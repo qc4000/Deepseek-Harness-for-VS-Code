@@ -17,6 +17,13 @@
     "Other"
   ],
   "main": "./extension.js",
+  "scripts": {
+    "test": "node scripts/run-tests.js",
+    "test:all": "node scripts/run-tests.js --e2e",
+    "test:one": "node scripts/run-tests.js --only",
+    "test:verbose": "node scripts/run-tests.js --verbose",
+    "package": "npx --yes @vscode/vsce package --allow-missing-repository"
+  },
   "extensionKind": [
     "workspace"
   ],

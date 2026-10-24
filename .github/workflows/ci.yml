@@ -1,0 +1,65 @@
+name: CI
+
+# 每次 push / PR 都跑：语法检查 + 11 套离线单测（零依赖，无需 npm install）。
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: 测试 ${{ matrix.os }} / Node ${{ matrix.node }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            node: 18
+          - os: ubuntu-latest
+            node: 20
+          - os: ubuntu-latest
+            node: 22
+          - os: windows-latest
+            node: 20
+          - os: macos-latest
+            node: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+      # 本仓库零依赖：不执行 npm install / npm ci。
+      - name: 语法检查 + 单元测试
+        run: npm test
+
+  package:
+    name: 打包 .vsix
+    runs-on: ubuntu-latest
+    needs: test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: 打包
+        run: npx --yes @vscode/vsce package --allow-missing-repository
+      - name: 校验包内容（不应包含 docs/、test/、scripts/、.github/、AGENTS.md）
+        run: |
+          set -e
+          unzip -l ./*.vsix | grep -E 'extension/(docs|test|scripts|\.github)/|AGENTS\.md' && exit 1 || true
+          unzip -l ./*.vsix | grep -q 'extension/dsh-plugins/dsh-vscode-file-links/lib/client.js'
+          unzip -l ./*.vsix | grep -q 'extension/extension.js'
+          echo "包内容校验通过"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: vsix
+          path: ./*.vsix

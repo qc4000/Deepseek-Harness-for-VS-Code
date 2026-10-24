@@ -6,3 +6,8 @@ node_modules/**
 .git/**
 test/**
 proxy/*.log
+# 开发文档与工程脚本不进扩展包（dsh-plugins/ 必须保留：运行时读盘分发）
+docs/**
+scripts/**
+.github/**
+**/AGENTS.md
