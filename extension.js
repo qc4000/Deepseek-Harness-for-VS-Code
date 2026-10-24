@@ -1459,7 +1459,7 @@ function jsonForScript(value) {
  * @param {'revealAndOpen'|'revealOnly'|'off'} [requestedFileLinkMode] 工作区文件链接接管开关
  * @returns {string}
  */
-function buildIframeHtml(url, scale, requestedFileLinkMode) {
+function buildIframeHtml(url, scale, requestedFileLinkMode, sidebar) {
   // 解析显示地址，仅放行 http/https，并把其精确 origin 写入 frame-src，
   // 不再通配整个本机回环地址段，保持 webview 沙箱最小权限。
   // Remote 场景下 asExternalUri 可能返回带转发端口的 localhost 地址，也可能返回 HTTPS 转发域名，
@@ -1478,6 +1478,18 @@ function buildIframeHtml(url, scale, requestedFileLinkMode) {
   const s = Number.isFinite(scale) ? Math.min(2, Math.max(0.5, scale)) : 1;
   // 工作区文件链接接管开关（off = 只做环境标记，不给握手回执，DSH 页面内的插件保持惰性）。
   const fileLinkMode = FILE_LINK_ACTIONS.includes(requestedFileLinkMode) && requestedFileLinkMode !== 'off' ? requestedFileLinkMode : 'off';
+  // 侧栏隐藏（父容器视口裁剪）：有效隐/显由页面内按实际宽度与策略计算，宿主只提供策略与手动覆盖。
+  // show 且无手动覆盖时完全不介入：不渲染工具条、不发 layout 握手回执（行为同 1.0.1 之前）。
+  const ui = sidebar || { policy: 'show', override: null };
+  const sidebarPolicyValue = SIDEBAR_POLICIES.includes(ui.policy) ? ui.policy : 'auto';
+  const sidebarOverrideValue = typeof ui.override === 'boolean' ? ui.override : null;
+  const sidebarChrome = sidebarPolicyValue !== 'show' || sidebarOverrideValue !== null;
+  const sidebarToolbarHtml = sidebarChrome
+    ? '<div id="dsh-toolbar"><button id="dsh-sidebar-toggle" type="button" aria-label="隐藏 DSH 侧栏" title="隐藏 DSH 侧栏" data-hidden="false">'
+      + '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1" aria-hidden="true">'
+      + '<rect x="1.5" y="2.5" width="13" height="11" rx="1.5"></rect><line x1="6" y1="2.5" x2="6" y2="13.5"></line></svg>'
+      + '<span id="dsh-sidebar-toggle-label">隐藏侧栏</span></button></div>'
+    : '';
   // 用 CSS zoom 缩放（重新布局、按设备分辨率渲染，任意字号下清晰），
   // 不用 transform:scale（渲染后栅格化缩放，非整数倍缩放时整页模糊）。
   return `<!DOCTYPE html>
@@ -1486,22 +1498,62 @@ function buildIframeHtml(url, scale, requestedFileLinkMode) {
 <meta charset="UTF-8">
 <meta http-equiv="Content-Security-Policy"
       content="default-src 'none'; frame-src ${escapeHtml(origin)}; style-src 'unsafe-inline'; script-src 'nonce-${nonce}';">
+<style>
+  /* 顶部 28px 工具条 + 裁剪层：隐藏侧栏只改 --dsh-crop，不重载 iframe。 */
+  html, body { margin: 0; padding: 0; height: 100%; overflow: hidden; background: var(--vscode-editor-background); }
+  body { display: flex; flex-direction: column; }
+  #dsh-toolbar { flex: none; display: flex; align-items: center; gap: 6px; height: 28px; padding: 0 6px; box-sizing: border-box;
+    background: var(--vscode-sideBar-background, var(--vscode-editor-background));
+    border-bottom: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, .35));
+    font-family: var(--vscode-font-family); font-size: 12px; color: var(--vscode-foreground); }
+  #dsh-sidebar-toggle { display: inline-flex; align-items: center; gap: 4px; height: 22px; padding: 0 6px; border: none;
+    border-radius: 3px; background: transparent; color: inherit; font: inherit; cursor: pointer; }
+  #dsh-sidebar-toggle:hover { background: var(--vscode-toolbar-hoverBackground, rgba(128, 128, 128, .2)); }
+  #dsh-sidebar-toggle:focus-visible { outline: 1px solid var(--vscode-focusBorder); outline-offset: -1px; }
+  #dsh-sidebar-toggle svg { width: 14px; height: 14px; display: block; }
+  /* 裁剪层不参与缩放：--dsh-crop 即视觉像素，与 iframe 上的 zoom 解耦。 */
+  #dsh-stage { position: relative; flex: 1 1 auto; min-height: 0; overflow: hidden; }
+  #dsh-clip { position: absolute; top: 0; bottom: 0; left: calc(-1 * var(--dsh-crop, 0px)); width: calc(100% + var(--dsh-crop, 0px)); }
+  #dsh-frame { width: 100%; height: 100%; border: none; display: block; zoom: ${s}; }
+</style>
 </head>
-<body style="margin:0;padding:0;width:100vw;height:100vh;overflow:hidden;background:var(--vscode-editor-background);">
+<body>
+${sidebarToolbarHtml}
+<div id="dsh-stage">
+<div id="dsh-clip">
 <iframe id="dsh-frame" name="${VSCODE_HOST_ID}" src="${escapeHtml(url)}"
         style="width:100%;height:100%;border:none;display:block;zoom:${s};"
         allow="clipboard-read; clipboard-write; autoplay"></iframe>
+</div>
+</div>
 <script nonce="${nonce}">
 (function () {
   var frame = document.getElementById('dsh-frame');
+  var stage = document.getElementById('dsh-stage');
+  var clip = document.getElementById('dsh-clip');
+  var toolbar = document.getElementById('dsh-toolbar');
+  var toggle = document.getElementById('dsh-sidebar-toggle');
+  var toggleLabel = document.getElementById('dsh-sidebar-toggle-label');
   var current = ${s};
   var vscode = acquireVsCodeApi();
-  // 与 DSH 页面内插件 dsh-vscode-file-links 之间的协议常量：插件发消息时带
-  // source = PLUGIN_ID，本 webview 回消息时带 source = HOST_ID。
+  // 与 DSH 页面内插件之间的协议常量：插件发消息时带自己的 source，本 webview 回消息时带 HOST_ID。
   var HOST_ID = ${jsonForScript(VSCODE_HOST_ID)};
   var PLUGIN_ID = ${jsonForScript(FILE_LINK_PLUGIN_SOURCE)};
+  var LAYOUT_ID = ${jsonForScript(LAYOUT_PLUGIN_SOURCE)};
   var FRAME_ORIGIN = ${jsonForScript(origin)};
   var fileLinkMode = ${jsonForScript(fileLinkMode)};
+  // 侧栏策略：override（用户手动）> policy（配置）> 宽度自适应（与 DSH 的 1024 断点一致）。
+  var sidebarChrome = ${jsonForScript(sidebarChrome)};
+  var sidebarPolicy = ${jsonForScript(sidebarPolicyValue)};
+  var sidebarOverride = ${sidebarOverrideValue === null ? 'null' : String(sidebarOverrideValue)};
+  var NARROW = ${SIDEBAR_NARROW_WIDTH};
+  var HANDLE = ${SIDEBAR_HANDLE_ALLOWANCE};
+  var MAX_MEASURE = ${SIDEBAR_MAX_MEASURE};
+  // 插件实测值（null = 尚未测量）与「测量不可用」提示状态。
+  var measured = null;
+  var unavailableReported = false;
+  var unavailableTimer = null;
+  var hidden = computeHidden();
   function frameWindow() {
     return frame && frame.contentWindow ? frame.contentWindow : null;
   }
@@ -1517,10 +1569,85 @@ function buildIframeHtml(url, scale, requestedFileLinkMode) {
     if (!w) return;
     try { w.postMessage(payload, FRAME_ORIGIN); } catch (e) { /* 页面正在切换：忽略 */ }
   }
-  /** 握手回执：插件据此确认「外层是本 VS Code 面板，可以接管文件链接点击」。 */
-  function ackFrame() {
+
+  /** 面板可视宽度（裁剪前）。 */
+  function stageWidth() {
+    var w = stage && typeof stage.clientWidth === 'number' ? stage.clientWidth : 0;
+    if (!(w > 0) && document.documentElement) {
+      w = typeof document.documentElement.clientWidth === 'number' ? document.documentElement.clientWidth : 0;
+    }
+    return w > 0 ? w : 0;
+  }
+
+  /** 有效隐藏状态：手动覆盖 > 配置策略 > 宽度自适应。 */
+  function computeHidden() {
+    if (sidebarOverride !== null) return sidebarOverride;
+    if (sidebarPolicy === 'hide') return true;
+    if (sidebarPolicy === 'show') return false;
+    return stageWidth() < NARROW;
+  }
+
+  /** 需要裁掉的像素：实测侧栏宽度 + 展开态手柄余量；未测量时为 0（宁可不隐藏也不切内容）。 */
+  function cropPixels() {
+    if (!hidden || !measured) return 0;
+    var w = Number(measured.sidebarWidth);
+    if (!isFinite(w) || w <= 0) return 0;
+    var px = Math.round(w) + (measured.collapsed ? 0 : HANDLE);
+    return Math.max(0, Math.min(MAX_MEASURE, px));
+  }
+
+  function updateToggle() {
+    if (!toggle) return;
+    var label = hidden ? '显示 DSH 侧栏' : '隐藏 DSH 侧栏';
+    toggle.setAttribute('aria-label', label);
+    toggle.setAttribute('title', label);
+    toggle.setAttribute('data-hidden', hidden ? 'true' : 'false');
+    if (toggleLabel) toggleLabel.textContent = hidden ? '显示侧栏' : '隐藏侧栏';
+  }
+
+  /** 把裁剪量与按钮状态同步到 DOM（只改 CSS 变量，不重载 iframe）。 */
+  function applyLayout() {
+    if (clip && clip.style && typeof clip.style.setProperty === 'function') {
+      clip.style.setProperty('--dsh-crop', cropPixels() + 'px');
+    }
+    updateToggle();
+  }
+
+  /** 隐藏但拿不到测量值：明确告知（禁止静默「点了没反应」）。 */
+  function scheduleUnavailable() {
+    if (unavailableReported || unavailableTimer !== null || !hidden || measured) return;
+    unavailableTimer = setTimeout(function () {
+      unavailableTimer = null;
+      if (!hidden || measured || unavailableReported) return;
+      unavailableReported = true;
+      try { vscode.postMessage({ type: 'dsh-sidebar-unavailable' }); } catch (e) { /* 面板已销毁 */ }
+    }, 3000);
+  }
+
+  function setHidden(value, reason) {
+    hidden = !!value;
+    applyLayout();
+    if (hidden) scheduleUnavailable();
+    if (reason === 'user') {
+      try { vscode.postMessage({ type: 'dsh-sidebar-state', hidden: hidden, reason: 'user' }); } catch (e) { /* 忽略 */ }
+    }
+  }
+
+  /** 握手回执（文件链接）：插件据此确认「外层是本 VS Code 面板」，off 时保持惰性。 */
+  function ackFileLinks() {
     if (fileLinkMode === 'off') return;
     postToFrame({ source: HOST_ID, type: 'ack', fileLinks: true, mode: fileLinkMode });
+  }
+
+  /** 握手回执（侧栏测量）：show 且无手动覆盖时完全不介入。 */
+  function ackLayout() {
+    if (!sidebarChrome) return;
+    postToFrame({ source: HOST_ID, type: 'ack', layout: true });
+  }
+
+  function ackFrame() {
+    ackFileLinks();
+    ackLayout();
   }
   if (frame) {
     // iframe 每次加载（刷新 / 重启 dsh web）后重新握手，兼容插件先于或后于本脚本就绪。
@@ -1530,6 +1657,19 @@ function buildIframeHtml(url, scale, requestedFileLinkMode) {
       setTimeout(ackFrame, 2000);
     });
   }
+  if (toggle) {
+    // 只切 CSS 变量：DSH 的滚动位置、输入内容、运行中的任务都不受影响。
+    toggle.addEventListener('click', function () { setHidden(!hidden, 'user'); });
+  }
+  window.addEventListener('resize', function () {
+    // 只有 auto 策略跟随宽度；用户手动覆盖之后不再自动改。
+    if (sidebarOverride !== null || sidebarPolicy !== 'auto') return;
+    var next = computeHidden();
+    if (next === hidden) return;
+    hidden = next;
+    applyLayout();
+    if (hidden) scheduleUnavailable();
+  });
   function apply(scale) {
     var n = Number(scale);
     if (!isFinite(n)) return;
@@ -1556,6 +1696,16 @@ function buildIframeHtml(url, scale, requestedFileLinkMode) {
           path: data.path.slice(0, 4096)
         });
       }
+      return;
+    }
+    if (data.source === LAYOUT_ID) {
+      // DSH 页面内布局插件发来的实测值：只认自己那个 iframe、且 origin 必须是 DSH 地址。
+      if (!fromOurFrame(event)) return;
+      var width = data.sidebarWidth;
+      // 只接受真正的有限数字且落在合理区间（展开 264-420 / 折叠 56 / 隐藏 0）。
+      if (typeof width !== 'number' || !isFinite(width) || width < 0 || width > MAX_MEASURE) return;
+      measured = { sidebarWidth: width, collapsed: data.collapsed === true };
+      applyLayout();
       return;
     }
     if (data.type === 'dsh-reveal-result' && typeof data.token === 'string') {
@@ -1588,8 +1738,22 @@ function buildIframeHtml(url, scale, requestedFileLinkMode) {
           vscode.postMessage({ type: 'insert-selection-ack', status: 'error' });
         } catch (e2) { /* ignore */ }
       }
+    } else if (data.type === 'dsh-sidebar-toggle') {
+      // 宿主命令 / 快捷键：与点按钮等价（同样算用户意图，需要持久化）。
+      setHidden(!hidden, 'user');
+    } else if (data.type === 'dsh-sidebar-config') {
+      // 配置变更（宿主已清除手动覆盖）：按新策略与当前宽度重新判定，不重载 iframe。
+      sidebarPolicy = data.policy === 'hide' ? 'hide' : (data.policy === 'show' ? 'show' : 'auto');
+      sidebarOverride = null;
+      if (toolbar && toolbar.style) toolbar.style.display = sidebarPolicy === 'show' ? 'none' : 'flex';
+      hidden = computeHidden();
+      applyLayout();
+      if (hidden) scheduleUnavailable();
     }
   });
+  // 初始裁剪（未测量时为 0，等插件上报）；隐藏但拿不到测量时给出提示。
+  applyLayout();
+  if (hidden) scheduleUnavailable();
 }());
 </script>
 </body>
@@ -1632,7 +1796,25 @@ const FILE_LINK_PLUGIN_SOURCE = 'dsh-vscode-file-links';
 // 文件链接点击行为：资源管理器定位 + 打开文件 / 仅定位 / 不接管（保持 DSH 行为）。
 const FILE_LINK_ACTION_KEY = 'dshPanel.workspaceFileLinkAction';
 const FILE_LINK_ACTIONS = ['revealAndOpen', 'revealOnly', 'off'];
-// Copilot 桥接的「条目 ↔ DSH 在册模型」漂移自检是否已有结论（见 checkDshModelDrift）。
+// 内置布局测量插件（源码在 dsh-plugins/，随扩展直接写入 DSH web profile，不经 npm）：
+// 只读上报 DSH 左侧栏宽度与折叠状态，供面板做父容器视口裁剪。
+const LAYOUT_PLUGIN_NAME = 'dsh-vscode-layout';
+const LAYOUT_PLUGIN_SOURCE = 'dsh-vscode-layout';
+// 与 dsh 布局插件（dsh-client-ui-layout）的 SIDEBAR_AUTO_COLLAPSE 一致：
+// 视口窄于该值时 DSH 自动把左侧栏折叠成导轨。
+const SIDEBAR_NARROW_WIDTH = 1024;
+// DSH 侧栏拖动手柄宽 8px、居中在 track 边界（margin-left:-4px）；只裁 track 会让 4px 热区
+// 留在可见区左缘（误触会改侧栏宽度）。折叠态没有手柄，故不加。
+const SIDEBAR_HANDLE_ALLOWANCE = 4;
+// 侧栏合理宽度上限（展开 264-420 / 折叠 56 / 隐藏 0）；超出即视为异常测量。
+const SIDEBAR_MAX_MEASURE = 1024;
+// 侧栏显示策略与手动覆盖（globalState）。
+const SIDEBAR_POLICY_KEY = 'dshPanel.dshSidebar';
+const SIDEBAR_POLICIES = ['auto', 'show', 'hide'];
+const SIDEBAR_OVERRIDE_KEY = 'dsh.ui.dshSidebarHidden';
+
+/** 测量不可用的提示是否已弹过（每窗口只提醒一次）。 */
+let sidebarUnavailableNotified = false;
 let dshModelDriftChecked = false;
 
 function dshHomeDir() {
@@ -1947,13 +2129,14 @@ async function ensureClipboardPlugin(profileDir) {
 }
 
 /**
- * 内置工作区文件链接插件 dsh-vscode-file-links 的文件清单（相对路径 → 内容）。
+ * 内置插件的文件清单（相对路径 → 内容）。
  * 源码以真实文件形式放在扩展的 dsh-plugins/ 目录里（而非扩展内的模板字面量），
  * 避免正则反斜杠被模板转义折叠这类问题，也让插件可以单独语法检查。
- * @returns {Record<string, string>} 相对路径 → 文件内容
+ * @param {string} name 插件目录名（= 包名）
+ * @returns {Record<string, string>}
  */
-function fileLinkPluginFiles() {
-  const base = path.join(__dirname, BUNDLED_PLUGINS_DIR, FILE_LINK_PLUGIN_NAME);
+function bundledPluginFiles(name) {
+  const base = path.join(__dirname, BUNDLED_PLUGINS_DIR, name);
   const rels = ['package.json', 'cordis.patch.yml', 'lib/index.js', 'lib/client.js'];
   const files = {};
   for (const rel of rels) {
@@ -1962,42 +2145,63 @@ function fileLinkPluginFiles() {
   return files;
 }
 
-/** 内置工作区文件链接插件的版本（以插件自己的 package.json 为单一源头）。 */
-function fileLinkPluginVersion() {
+/** 内置插件版本（以其自己的 package.json 为单一源头）。 */
+function bundledPluginVersion(name) {
   try {
-    return JSON.parse(fileLinkPluginFiles()['package.json']).version || '0.0.0';
+    return JSON.parse(bundledPluginFiles(name)['package.json']).version || '0.0.0';
   } catch {
     return '0.0.0';
   }
 }
 
 /**
- * 确保内置插件 dsh-vscode-file-links 已落盘并声明（不经 npm）。
- * @returns {Promise<boolean>} 本次是否发生新增/升级（true 时需重启 dsh web 生效）。
+ * 确保某个内置插件已落盘并声明（不经 npm，幂等）。
+ * @param {string} profileDir
+ * @param {string} name
+ * @param {string} label 用于提示文案的中文名
+ * @returns {Promise<boolean>} 本次是否发生新增/升级（true 时需重启 dsh web 生效）
  */
-async function ensureFileLinkPlugin(profileDir) {
+async function ensureBundledPlugin(profileDir, name, label) {
   try {
-    const version = fileLinkPluginVersion();
-    const installed = await installedPluginVersion(profileDir, FILE_LINK_PLUGIN_NAME);
+    const version = bundledPluginVersion(name);
+    const installed = await installedPluginVersion(profileDir, name);
     if (installed === version) {
-      await ensureProfileDeclaration(profileDir, FILE_LINK_PLUGIN_NAME, null);
+      await ensureProfileDeclaration(profileDir, name, null);
       return false; // 版本一致，无需写入
     }
-    const files = fileLinkPluginFiles();
-    const base = path.join(profileDir, 'node_modules', FILE_LINK_PLUGIN_NAME);
+    const files = bundledPluginFiles(name);
+    const base = path.join(profileDir, 'node_modules', name);
     for (const rel of Object.keys(files)) {
       const dest = path.join(base, rel);
       await fs.promises.mkdir(path.dirname(dest), { recursive: true });
       await fs.promises.writeFile(dest, files[rel], 'utf8');
     }
     // dependencies 不写入该包（npm 注册表上没有），只登记 bundles 供 DSH 加载。
-    await ensureProfileDeclaration(profileDir, FILE_LINK_PLUGIN_NAME, null);
+    await ensureProfileDeclaration(profileDir, name, null);
     return true;
   } catch (e) {
-    console.error(`[DeepSeek Harness] 安装内置插件 ${FILE_LINK_PLUGIN_NAME} 失败：`, e);
-    vscode.window.showWarningMessage(`安装 DSH 工作区文件链接插件 ${FILE_LINK_PLUGIN_NAME} 失败：${e.message}`);
+    console.error(`[DeepSeek Harness] 安装内置插件 ${name} 失败：`, e);
+    vscode.window.showWarningMessage(`安装 DSH ${label}插件 ${name} 失败：${e.message}`);
     return false;
   }
+}
+
+function fileLinkPluginFiles() {
+  return bundledPluginFiles(FILE_LINK_PLUGIN_NAME);
+}
+
+function fileLinkPluginVersion() {
+  return bundledPluginVersion(FILE_LINK_PLUGIN_NAME);
+}
+
+/** 确保内置工作区文件链接插件已落盘并声明（不经 npm）。 */
+function ensureFileLinkPlugin(profileDir) {
+  return ensureBundledPlugin(profileDir, FILE_LINK_PLUGIN_NAME, '工作区文件链接');
+}
+
+/** 确保内置布局测量插件已落盘并声明（不经 npm）。 */
+function ensureLayoutPlugin(profileDir) {
+  return ensureBundledPlugin(profileDir, LAYOUT_PLUGIN_NAME, '布局测量');
 }
 
 /**
@@ -2007,6 +2211,34 @@ async function ensureFileLinkPlugin(profileDir) {
 function fileLinkAction() {
   const raw = String(cfg().get(FILE_LINK_ACTION_KEY, 'revealAndOpen') || '');
   return FILE_LINK_ACTIONS.includes(raw) ? raw : 'revealAndOpen';
+}
+
+/**
+ * 侧栏显示策略（配置值，非法值收敛为 auto）。
+ * - auto：窄于 SIDEBAR_NARROW_WIDTH 隐藏（与 DSH 自身的折叠断点一致）；
+ * - show：始终显示（不拦截任何东西，也不安装测量插件）；
+ * - hide：始终隐藏。
+ * @returns {'auto'|'show'|'hide'}
+ */
+function sidebarPolicy() {
+  const raw = String(cfg().get(SIDEBAR_POLICY_KEY, 'auto') || '');
+  return SIDEBAR_POLICIES.includes(raw) ? raw : 'auto';
+}
+
+/** 用户手动覆盖（null = 无覆盖，跟随策略）。 */
+function sidebarOverride() {
+  const v = gContext ? gContext.globalState.get(SIDEBAR_OVERRIDE_KEY) : null;
+  return typeof v === 'boolean' ? v : null;
+}
+
+/** 面板渲染所需的侧栏状态（有效隐/显由页面内根据实际宽度计算）。 */
+function sidebarUiState() {
+  return { policy: sidebarPolicy(), override: sidebarOverride() };
+}
+
+/** 是否需要内置布局测量插件：show 策略（不启用隐藏）时不安装，保持零干预。 */
+function shouldInstallLayoutPlugin() {
+  return sidebarPolicy() !== 'show';
 }
 
 /**
@@ -2043,6 +2275,13 @@ async function ensureDshPlugins() {
     // 配置为 off（不接管）时不安装/不更新，插件不动 DSH 既有行为。
     if (fileLinkAction() !== 'off') {
       if (await ensureFileLinkPlugin(profileDir)) {
+        changed = true;
+      }
+    }
+    // 内置布局测量插件（文件随扩展直接写入，不走 npm）：只读上报左侧栏宽度，
+    // 供面板做视口裁剪；show 策略（不启用隐藏）时不安装/不更新。
+    if (shouldInstallLayoutPlugin()) {
+      if (await ensureLayoutPlugin(profileDir)) {
         changed = true;
       }
     }
@@ -2208,7 +2447,39 @@ function handleWebviewMessage(msg, webview) {
     } else {
       vscode.window.showErrorMessage('转发失败：未知错误');
     }
+  } else if (msg && msg.type === 'dsh-sidebar-state') {
+    // 用户手动切换：记住覆盖值，窗口重载/切换视图后保持（配置变更时清除）。
+    if (typeof msg.hidden === 'boolean' && msg.reason === 'user' && gContext) {
+      gContext.globalState.update(SIDEBAR_OVERRIDE_KEY, msg.hidden).then(() => {}, () => {});
+    }
+  } else if (msg && msg.type === 'dsh-sidebar-unavailable') {
+    // 隐藏了却拿不到侧栏宽度：不静默，给一次可见提示（每窗口一次）。
+    if (!sidebarUnavailableNotified) {
+      sidebarUnavailableNotified = true;
+      vscode.window.setStatusBarMessage(
+        'DSH 侧栏宽度不可用：本次未隐藏（布局测量插件未生效，可点「重启 dsh web」后重试）',
+        8000
+      );
+    }
   }
+}
+
+/**
+ * 侧栏策略变更（`dshPanel.dshSidebar`）：清除手动覆盖、通知面板即时重算、必要时补装测量插件。
+ * 注意不能走整页 reload——那会丢失 DSH 的滚动位置与输入内容。
+ */
+function applySidebarPolicyChange() {
+  if (gContext) {
+    gContext.globalState.update(SIDEBAR_OVERRIDE_KEY, undefined).then(() => {}, () => {});
+  }
+  const target = activeTab || activeView;
+  if (target) {
+    try {
+      target.webview.postMessage({ type: 'dsh-sidebar-config', policy: sidebarPolicy() });
+    } catch { /* 面板已销毁：忽略 */ }
+  }
+  // show → 其它策略时需要测量插件；安装/升级后需重启 dsh web 才会加载。
+  ensureDshPlugins().catch(() => {});
 }
 
 /**
@@ -2256,7 +2527,7 @@ async function preparePanelHtml(isTab) {
   const pluginInstalled = await ensureDshPlugins();
   if (pluginInstalled && (await checkUrl(getUrl()))) {
     // 服务已在运行但插件刚装上，需重启 dsh web 才加载。
-    vscode.window.showInformationMessage('已自动安装/更新 DSH 插件（dsh-drop-caret / dsh-webview-clipboard / dsh-vscode-file-links），请点击面板顶部的「重启 dsh web」使其生效。');
+    vscode.window.showInformationMessage('已自动安装/更新 DSH 插件（dsh-drop-caret / dsh-webview-clipboard / dsh-vscode-file-links / dsh-vscode-layout），请点击面板顶部的「重启 dsh web」使其生效。');
   }
 
   const ok = await ensureRunningOnce();
@@ -2287,7 +2558,7 @@ async function preparePanelHtml(isTab) {
     };
   }
   try {
-    return { ok: true, html: buildIframeHtml(target.displayUrl, getFontScale(), fileLinkAction()) };
+    return { ok: true, html: buildIframeHtml(target.displayUrl, getFontScale(), fileLinkAction(), sidebarUiState()) };
   } catch (e) {
     // 显示地址无法解析或协议不是 http/https 时，拒绝加载 iframe 并展示错误页。
     return { ok: false, kind: 'unloadable', reason: e.message };
@@ -3899,7 +4170,10 @@ function activate(context) {
       view.webview.onDidReceiveMessage((m) => handleWebviewMessage(m, view.webview));
 
       const cfgSub = vscode.workspace.onDidChangeConfiguration((e) => {
-        if (e.affectsConfiguration('dshPanel')) {
+        if (e.affectsConfiguration(SIDEBAR_POLICY_KEY)) {
+          // 侧栏策略单独处理：只推消息重算，不重载 iframe。
+          applySidebarPolicyChange();
+        } else if (e.affectsConfiguration('dshPanel')) {
           render(view);
         } else if (e.affectsConfiguration('editor.fontSize')) {
           // 仅字号变化时不重载 iframe（避免打断当前对话），只推送新的缩放值。
@@ -3959,7 +4233,9 @@ function activate(context) {
 
     const cfgSub = vscode.workspace.onDidChangeConfiguration((e) => {
       if (disposed) return;
-      if (e.affectsConfiguration('dshPanel')) {
+      if (e.affectsConfiguration(SIDEBAR_POLICY_KEY)) {
+        applySidebarPolicyChange();
+      } else if (e.affectsConfiguration('dshPanel')) {
         reloadTab();
       } else if (e.affectsConfiguration('editor.fontSize')) {
         // 仅字号变化时不重载 iframe（避免打断当前对话），只推送新的缩放值。
@@ -4056,7 +4332,7 @@ function activate(context) {
       }
       view.description = getUrl();
       try {
-        view.webview.html = buildIframeHtml(target.displayUrl, getFontScale(), fileLinkAction());
+        view.webview.html = buildIframeHtml(target.displayUrl, getFontScale(), fileLinkAction(), sidebarUiState());
       } catch (e) {
         view.description = '无法加载';
         view.webview.html = buildErrorHtml(e.message);
@@ -4116,6 +4392,18 @@ function activate(context) {
     showChatStatus().catch((e) => vscode.window.showErrorMessage('检查 DSH 状态失败：' + (e && e.message ? e.message : String(e))));
   });
 
+  // 切换 DSH 侧栏显示：与面板顶部按钮等价，供命令面板 / 快捷键使用。
+  const toggleDshSidebarCmd = vscode.commands.registerCommand('dshPanel.toggleDshSidebar', () => {
+    const target = activeTab || activeView;
+    if (!target) {
+      vscode.window.showInformationMessage('DeepSeek Harness 面板尚未打开，请先点击侧边栏图标。');
+      return;
+    }
+    try {
+      target.webview.postMessage({ type: 'dsh-sidebar-toggle' });
+    } catch { /* 面板已销毁：忽略 */ }
+  });
+
   const resetChatCmd = vscode.commands.registerCommand('dshPanel.resetChatMapping', async () => {
     if (gContext) {
       await gContext.globalState.update(DSH_MODEL_MAP_KEY, {});
@@ -4123,7 +4411,7 @@ function activate(context) {
     vscode.window.showInformationMessage('已重置 DSH 会话映射：下次提问将创建新的 DSH 会话。');
   });
 
-  context.subscriptions.push(viewSub, openInTabCmd, refreshCmd, openBrowserCmd, restartCmd, wsSub, sendSelectionCmd, chatStatusCmd, diagnoseModelsCmd, resetChatCmd);
+  context.subscriptions.push(viewSub, openInTabCmd, refreshCmd, openBrowserCmd, restartCmd, wsSub, sendSelectionCmd, chatStatusCmd, diagnoseModelsCmd, resetChatCmd, toggleDshSidebarCmd);
 }
 
 function deactivate() {
@@ -4159,6 +4447,11 @@ module.exports.__internals = {
   ensureFileLinkPlugin,
   FILE_LINK_PLUGIN_NAME,
   fileLinkAction,
+  ensureLayoutPlugin,
+  LAYOUT_PLUGIN_NAME,
+  sidebarPolicy,
+  sidebarUiState,
+  shouldInstallLayoutPlugin,
   buildIframeHtml,
   handleWebviewMessage,
   resolveWorkspaceTarget,
