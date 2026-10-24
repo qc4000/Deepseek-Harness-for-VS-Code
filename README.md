@@ -257,6 +257,22 @@ npx --yes @vscode/vsce package --allow-missing-repository
 code --install-extension deepseek-harness-vscode-<版本>.vsix
 ```
 
+### 开发与测试
+
+```bash
+npm test                    # 语法检查 + 11 套离线单测（282 项断言，无需 npm install）
+npm run test:one -- file-link   # 只跑文件名含该子串的套件
+npm run test:all            # 追加真实 dsh 端到端（需本机已安装 dsh）
+npm run package             # 打包 .vsix
+```
+
+贡献流程采用 **SDD（规格驱动）+ TDD**：行为变更先写 `docs/sdd/specs/NNN-*/spec.md`，
+再由失败测试驱动实现。开发约定、架构与发布流程：
+
+- [AGENTS.md](AGENTS.md)：命令、红线、约定、已知坑（供 AI 代理与贡献者）
+- [项目宪法](docs/CONSTITUTION.md) · [架构说明](docs/ARCHITECTURE.md) · [代码风格](docs/CONVENTIONS.md)
+- [测试与 TDD](docs/TESTING.md) · [CI/CD](docs/CI-CD.md) · [SDD 流程与模板](docs/sdd/README.md)
+
 ## 前置条件与已知限制
 
 - **前置条件**：已安装 DeepSeek Harness（`npm install -g @deepseek-ai/dsh` 全局安装或 `npx @deepseek-ai/dsh` 均可，扩展自动识别两种方式，也可用 `dshPanel.dshCommand` 指定完整路径）；DSH 默认响应头未设置 `X-Frame-Options` / 严格 CSP，可被 iframe 正常内嵌。
