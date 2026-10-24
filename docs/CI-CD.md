@@ -8,7 +8,7 @@
 
 | 工作流 | 触发 | 做什么 | 门禁 |
 | --- | --- | --- | --- |
-| **CI** | push 到 `main`、任意 PR、手动 | 5 个矩阵任务跑 `npm test`（语法检查 + 11 套单测）；全部通过后在 ubuntu 上打包 `.vsix` 并校验包内容 | PR 合并前必须绿 |
+| **CI** | push 到 `main`、任意 PR、手动 | 5 个矩阵任务跑 `npm test`（语法检查 + 12 套单测）；全部通过后在 ubuntu 上打包 `.vsix` 并校验包内容 | PR 合并前必须绿 |
 | **Release** | push tag `v*`、手动 | 跑测试 → 校验 tag 与 `package.json.version` 一致 → 打包 → 建 GitHub Release 上传 `.vsix` →（可选）发布 Marketplace | 发布必须绿 |
 
 合并前的必需检查（建议在仓库 Settings → Branches 中启用）：

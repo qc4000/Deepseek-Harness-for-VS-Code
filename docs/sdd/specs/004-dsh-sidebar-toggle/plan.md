@@ -61,10 +61,10 @@ stage(overflow:hidden)          │  --dsh-crop: 0 | S(+4)
 | --- | --- | --- |
 | 配置项 | `dshPanel.dshSidebar`: `auto`（默认）/ `show` / `hide` | 非法值按 `auto` |
 | 命令 | `DeepSeek Harness: 切换 DSH 侧栏显示`（`dshPanel.toggleDshSidebar`） | 无活动面板时提示先打开 |
-| globalState | `dsh.ui.dshSidebarHidden`: `null|true|false`（手动覆盖）；`dsh.ui.dshSidebarWidth`: `number`（上次测量） | 类型不符即忽略 |
+| globalState | `dsh.ui.dshSidebarHidden`: `null|true|false`（手动覆盖） | 类型不符即忽略 |
 | webview → 宿主 | `{type:'dsh-sidebar-state', hidden, reason:'user'|'auto'}` | `hidden` 必须为 boolean |
 | 宿主 → webview | `{type:'dsh-sidebar-toggle'}` / `{type:'dsh-sidebar-config', policy}` | 未知类型忽略 |
-| 插件 → webview | `{source:'dsh-vscode-layout', type:'layout', sidebarWidth, collapsed, animating}` | 宽度需有限数且 0–1024，否则丢弃 |
+| 插件 → webview | `{source:'dsh-vscode-layout', type:'layout', sidebarWidth, collapsed}` | 宽度需为 number、有限且 0–1024，否则丢弃 |
 | webview → 插件 | `{source:'dsh-vscode-host', type:'ack', layout:true}` / `{type:'request-layout'}` | 未 ack 时插件保持静默 |
 | 插件安装 | 版本以 `dsh-plugins/dsh-vscode-layout/package.json` 为单一源头；`policy==='show'` 时不安装/不更新 | 安装失败只告警，不影响面板 |
 
@@ -74,7 +74,7 @@ stage(overflow:hidden)          │  --dsh-crop: 0 | S(+4)
 | --- | --- | --- | --- | --- |
 | `hidden`（有效值） | webview 内存 | 初始（策略+宽度）、按钮、宿主消息 | 面板销毁 | 每次渲染重算 |
 | 手动覆盖 | `globalState` | 用户点击按钮 | 配置变更时清除 | `null` 表示无覆盖 |
-| 测量值 | webview 内存 + `globalState` 缓存 | 插件上报 | 面板销毁 | 超范围丢弃；无值时用缓存值仅作"显示中的初始值"，不用于隐藏 |
+| 测量值 | webview 内存 | 插件上报 | 面板销毁 | 超范围丢弃；未测量时不裁剪（不猜宽度） |
 | 插件安装去重 | 既有 `ensureProfileDeclaration` 幂等 | — | — | 版本一致不写盘 |
 
 ## 7. 安全审查
@@ -122,6 +122,7 @@ stage(overflow:hidden)          │  --dsh-crop: 0 | S(+4)
 | 调用 `ctx.layout.toggleSidebar()` | DSH 只能折叠到 56px 导轨，仍需裁剪；且会改 DSH 内部状态、丢失拖动宽度 |
 | 认证代理改写 HTML 注入样式 | 绕过插件握手、难排障，等于偷偷改页面 |
 | 新增底部面板容器 | 需把"标签页 vs 侧边栏"二态重构为多 surface，超出本次范围 |
+| 初稿用 `animating` 事件延迟到折叠动画结束再取值 | 延迟期间侧栏已开始缩放而裁剪量未跟上，会短暂露出/裁切；改为**逐帧跟随**（`ResizeObserver` + `requestAnimationFrame` 合并上报，拖动时 60/秒量级） |
 
 ## 12. 开放问题
 

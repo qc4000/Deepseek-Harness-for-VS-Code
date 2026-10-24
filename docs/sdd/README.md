@@ -116,4 +116,4 @@ draft ──► approved ──► implementing ──► implemented ──► 
 | `001` | 工作区文件链接接管（基线示例，已实现） | 见 [specs/001-workspace-file-links/spec.md](specs/001-workspace-file-links/spec.md) |
 | `002` | 桥接能力在旧版 VS Code 上的可见性（`engines` 与 `vscode.lm` 不一致，目前仅 `console.warn`） | 待立项，冲突宪法第三条 |
 | `003` | 文件链接行号定位（`#L12` 目前只用于解析路径，不定位行） | 待立项，见 `ARCHITECTURE.md` 已知限制 |
-| `004` | 面板内隐藏/显示 DSH 左侧栏（父容器视口裁剪 + 顶部工具条开关） | implementing，见 [specs/004-dsh-sidebar-toggle/](specs/004-dsh-sidebar-toggle/spec.md) |
+| `004` | 面板内隐藏/显示 DSH 左侧栏（父容器视口裁剪 + 顶部工具条开关） | implemented（1.0.1），见 [specs/004-dsh-sidebar-toggle/](specs/004-dsh-sidebar-toggle/spec.md) |

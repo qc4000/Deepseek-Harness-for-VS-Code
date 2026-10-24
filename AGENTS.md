@@ -9,12 +9,12 @@
 
 - **忠实窗口**：把 DSH Web GUI 原样内嵌到侧边栏/标签页；自动安装、启动、探测、认证 dsh；Remote 走端口转发。
 - **Copilot 桥接**：把 DSH 注册为聊天模型（`vendor: dsh`），滤除 VS Code 注入的噪音，按转录增量转发并流式回写。
-- **配套插件**（随包分发、可关闭）：`dsh-vscode-file-links`（源码在 `dsh-plugins/`）、内置 `dsh-webview-clipboard`、npm 包 `dsh-drop-caret`。
+- **配套插件**（随包分发、可关闭）：`dsh-vscode-file-links`（对话内工作区链接改在资源管理器打开）、`dsh-vscode-layout`（只读上报侧栏宽度，供面板视口裁剪）、内置 `dsh-webview-clipboard`、npm 包 `dsh-drop-caret`。
 
 ## 2. 命令
 
 ```bash
-npm test                      # 语法检查 + 11 套离线单测（282 项断言；无需 npm install）
+npm test                      # 语法检查 + 12 套离线单测（343 项断言；无需 npm install）
 npm run test:one -- <子串>    # 只跑匹配的套件（TDD 内循环）
 npm run test:all              # 追加真实 dsh e2e（需本机已装 dsh）
 npm run package               # 打 .vsix

@@ -62,6 +62,13 @@ render(view)
 标签页接管时侧边栏只渲染占位页，标签页关闭后 `render(activeView)` 恢复。
 标签页 URL 会把 `127.0.0.1` ↔ `localhost` 互换（`getTabDisplayUrl`），制造不同 origin。
 
+**侧栏裁剪（v1.0.1）**：面板 HTML 是 `toolbar(28px) + stage(overflow:hidden) + clip(left:-crop; width:100%+crop) + iframe(zoom)`。
+`--dsh-crop` 只写在未缩放的 `clip` 上，因此裁剪量与 `zoom` 无关；iframe 始终 `width:100%`。
+`crop = 实测侧栏宽度 + (折叠 ? 0 : 4)`（4px 避开 DSH 的 8px 拖动条热区），
+宽度由内置插件 `dsh-vscode-layout` 只读上报（`[class*="_sidebarCol"]` 的几何）。
+有效隐/显 = 手动覆盖 > `dshPanel.dshSidebar` > 宽度自适应（`< 1024` 隐藏，镜像 DSH 断点）。
+切换只改 CSS 变量，不重载 iframe。
+
 ## 4. 链路 B：受管认证代理
 
 ```
@@ -188,6 +195,7 @@ profile 目录：`$DSH_HOME`（默认 `~/.dsh`）`/profiles/web`；插件写入
 | --- | --- | --- | --- |
 | `dsh-drop-caret` | npm（`dsh plugin add` 优先，失败 `npm pack` 解压兜底） | ≥ 0.2.3 | 拖文件 / 选中内容插入对话框光标处 |
 | `dsh-webview-clipboard` | `clipboardPluginFiles()` 以源码字符串生成 | 0.2.1 | macOS 内嵌 iframe 下 ⌘C/⌘V/⌘X 失效修复（execCommand） |
+| `dsh-vscode-layout` | `bundledPluginFiles()` 读 `dsh-plugins/` 真实文件 | 0.1.0 | 只读上报 DSH 左侧栏宽度/折叠状态（供面板视口裁剪）；`dshPanel.dshSidebar=show` 时不安装 |
 | `dsh-vscode-file-links` | `dsh-plugins/` 真实文件随扩展分发 | 见插件 `package.json` | 工作区文件/文件夹链接改在 VS Code 资源管理器定位/打开 |
 
 任一插件新增/升级后：若 dsh 在运行，提示「请点击重启 dsh web 使其生效」。
@@ -211,6 +219,7 @@ webview → 宿主：{ type:'dsh-reveal-path', token, path }
 | 位置 | 键 | 内容 | 失效策略 |
 | --- | --- | --- | --- |
 | `globalState` | `dsh.modelSessions` | Copilot 聊天 → DSH 会话映射 | 15 分钟不活跃忽略；命令可重置 |
+| `globalState` | `dsh.ui.dshSidebarHidden` | 侧栏手动覆盖（`null` = 跟随配置） | 修改 `dshPanel.dshSidebar` 时清除 |
 | `globalState` | `dsh.webAuth.tokenCache` | `{ target, token, ts }` | target 不同则不用；仅本机内存 + globalState |
 | `globalState` | `dsh.authCapable` | dsh 是否支持 web 认证 | 老版确认后置 false，跳过等待逻辑 |
 | `globalState` | `dsh.quietBoot` | 从不打印启动行的 dsh | 置 true 后不再等待启动行 |
@@ -242,3 +251,6 @@ webview → 宿主：{ type:'dsh-reveal-path', token, path }
    `vscode.lm.registerLanguageModelChatProvider`；旧版 VS Code 上桥接不可用，目前只有
    `console.warn`（用户不可见）——与宪法第三条冲突，已登记为候选规格 `002`。
 6. **`freePort` 会杀端口占用进程**：仅「重启」且用户确认后调用；不要把它挪到自动路径。
+7. **侧栏裁剪依赖 DSH 内部布局**：`_sidebarCol` 类名 token、264–420/56 三档宽度、1024 断点、8px 拖动条、
+   300ms 折叠动画都是 dsh 0.2.x 的实现细节。DSH 升级后若读取不到宽度，插件会沉默、宿主会提示
+   「未隐藏」并保持原样——**不会切掉对话内容**；但需要回归 `test/dsh-sidebar.test.js` + 实机确认。

@@ -2,6 +2,20 @@
 
 本项目遵循 [语义化版本](https://semver.org/lang/zh-CN/)。完整提交历史见 [GitHub](https://github.com/Vithrive/Deepseek-Harness-for-VS-Code/commits/main)。
 
+## 1.0.1
+
+**忠实窗口（面板）**
+
+- **面板顶部新增 28px 工具条 + 「隐藏/显示 DSH 左侧栏」按钮**：隐藏时对话区占满面板宽度；`dshPanel.dshSidebar=auto`（默认）在窄于 1024px 的面板（侧边栏、底部面板）自动隐藏，编辑器标签页保持显示；手动切换在窗口重载后保持，修改配置会清除手动选择。
+- **零注入**：隐藏由父容器视口裁剪实现（iframe 加宽 + 左移 + `overflow:hidden` 裁切），不改 DSH 页面的 DOM、事件与状态。
+- **宽度实时跟随**：新增内置只读测量插件 `dsh-vscode-layout`（随扩展分发，不经 npm）——在 DSH 里拖动分隔条（264–420px）、折叠成导轨（56px）、改变面板宽度之后，隐藏依然精确；展开态额外裁 4px，避开 DSH 拖动手柄热区。
+- **失败不静默**：测量不可用时不裁剪并在状态栏提示一次；`dshPanel.dshSidebar=show` 时完全不介入（不安装测量插件、不裁剪、不显示工具条）。
+- 新增命令「DeepSeek Harness: 切换 DSH 侧栏显示」(`dshPanel.toggleDshSidebar`)，可用命令面板 / 快捷键切换。
+
+**测试**
+
+- 新增 `test/dsh-sidebar.test.js`（61 项断言）：中继脚本 `vm` 真跑（策略 / 测量 / 按钮 / 消息 / 未测量兜底）、测量插件仿真（握手 / 上报 / 折叠 / 卸载）、插件分发与安装幂等；全量 12 套 / 343 项断言。
+
 ## 1.0.0 —— 第一个正式版本
 
 **Copilot 桥接**
