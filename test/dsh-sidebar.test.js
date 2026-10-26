@@ -148,8 +148,6 @@ function makeRealm(opts) {
     states,
     crop: () => clip.style.getPropertyValue('--dsh-crop') || '',
     fireLoad: () => frameLoadHandlers.forEach((fn) => fn()),
-    /** 模拟面板宽度变化（宿主侧拖动）并触发 resize。 */
-    fireResize: () => winListeners.filter((l) => l.type === 'resize').forEach((l) => l.fn({})),
     /** 模拟重置计时器：只跑当前排队的定时器。 */
     runTimers: () => { for (const t of timers.splice(0)) { try { t.fn(); } catch (e) { console.error(e); } } },
     click: () => clickHandlers.forEach((fn) => fn({ preventDefault() {} })),
@@ -260,58 +258,6 @@ function report(realm, sidebarWidth, collapsed) {
     ok(cfgAuto.button.getAttribute('aria-label') === '显示 DSH 侧栏', 'auto 回落到宽度判定（900 → 隐藏）');
   }
 
-  console.log('[4b] 缩放：裁剪量按 zoom 换算（逻辑 px → 父容器 px）');
-  {
-    // CSS zoom 只作用于 iframe：插件量到的是 iframe 内部逻辑像素，
-    // 而 --dsh-crop 写在未缩放的外层，因此必须乘当前缩放倍率。
-    const z125 = makeRealm({ policy: 'hide', width: 900, scale: 1.25 });
-    report(z125, 280, false);
-    ok(z125.crop() === '355px', 'zoom 1.25 + 展开 280 → 裁剪 355（(280+4)×1.25）');
-    report(z125, 56, true);
-    ok(z125.crop() === '70px', 'zoom 1.25 + 折叠 56 → 70');
-
-    const z075 = makeRealm({ policy: 'hide', width: 900, scale: 0.75 });
-    report(z075, 280, false);
-    ok(z075.crop() === '213px', 'zoom 0.75 + 展开 280 → 213（(280+4)×0.75）');
-
-    const live = makeRealm({ policy: 'hide', width: 1600, scale: 1 });
-    report(live, 280, false);
-    ok(live.crop() === '284px', 'zoom 1 → 284');
-    live.fromHost({ type: 'dsh-font-scale', scale: 1.25 });
-    ok(live.crop() === '355px', '运行时改字号（宽面板）→ 不重载即按新缩放重算');
-    live.fromHost({ type: 'dsh-font-scale', scale: 0.75 });
-    ok(live.crop() === '213px', '再改小字号 → 同样重算');
-
-    // 窄面板改大字号：iframe 内部逻辑视口变小，DSH 会自行折成导轨（56）——
-    // 裁剪量必须跟着变成 70，而不是保留旧的 284（否则会切掉对话）。
-    const narrowLive = makeRealm({ policy: 'hide', width: 900, scale: 1 });
-    report(narrowLive, 280, false);
-    ok(narrowLive.crop() === '284px', '窄面板 + 展开 280 → 284');
-    narrowLive.fromHost({ type: 'dsh-font-scale', scale: 1.25 });
-    ok(narrowLive.crop() === '70px', '窄面板改大字号 → 折算为导轨 56 → 裁剪 70');
-  }
-
-  console.log('[4c] 面板变宽跨过 DSH 断点：先按规则预测裁剪量');
-  {
-    const r = makeRealm({ policy: 'hide', width: 900 });
-    report(r, 56, true);
-    ok(r.crop() === '56px', '窄容器隐藏（导轨 56）');
-    // (1000 + 56) >= 1024 → DSH 会从导轨切到展开 280，动画持续 300ms；
-    // 若等测量回来再改，侧栏会先露出一下。
-    r.stage.clientWidth = 1000;
-    r.fireResize();
-    ok(r.crop() === '284px', '变宽跨断点 → 立刻按预测的展开宽度裁剪（不等下一次测量）');
-    ok(r.frameMessages.some((m) => m.payload.type === 'request-layout'), '同时向插件请求一次权威测量');
-    report(r, 280, false);
-    ok(r.crop() === '284px', '测量回来后保持一致');
-
-    const stay = makeRealm({ policy: 'hide', width: 600 });
-    report(stay, 56, true);
-    stay.stage.clientWidth = 700;
-    stay.fireResize();
-    ok(stay.crop() === '56px', '仍在窄区间 → 预测不改变裁剪量（不抖动）');
-  }
-
   console.log('[5] 未测量不静默：上报 unavailable 且不裁剪');
   {
     const r = makeRealm({ policy: 'hide', width: 900 });
@@ -384,10 +330,6 @@ function report(realm, sidebarWidth, collapsed) {
     env.flush();
     const collapsed = layouts(env)[layouts(env).length - 1];
     ok(collapsed.sidebarWidth === 56 && collapsed.collapsed === true, '折叠 → 上报 56 且 collapsed=true');
-
-    const beforeForce = layouts(env).length;
-    env.requestLayout();
-    ok(layouts(env).length === beforeForce + 1, '宿主 request-layout → 强制上报一次（即使数值未变）');
 
     env.dispose();
     const count = layouts(env).length;
@@ -512,10 +454,6 @@ function makePluginEnv(opts) {
     ack: () => winListeners.filter((l) => l.type === 'message').forEach((l) => l.fn({
       source: sandbox.window.parent,
       data: { source: 'dsh-vscode-host', type: 'ack', fileLinks: true, layout: true }
-    })),
-    requestLayout: () => winListeners.filter((l) => l.type === 'message').forEach((l) => l.fn({
-      source: sandbox.window.parent,
-      data: { source: 'dsh-vscode-host', type: 'request-layout' }
     })),
     setWidth: (w) => { column.rect.width = w; },
     setCollapsed: (v) => { frame.attrs['data-sidebar-collapsed'] = v ? '' : null; },

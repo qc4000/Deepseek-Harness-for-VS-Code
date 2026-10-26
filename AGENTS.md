@@ -14,7 +14,7 @@
 ## 2. 命令
 
 ```bash
-npm test                      # 语法检查 + 12 套离线单测（357 项断言；无需 npm install）
+npm test                      # 语法检查 + 12 套离线单测（343 项断言；无需 npm install）
 npm run test:one -- <子串>    # 只跑匹配的套件（TDD 内循环）
 npm run test:all              # 追加真实 dsh e2e（需本机已装 dsh）
 npm run package               # 打 .vsix
