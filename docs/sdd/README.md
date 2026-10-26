@@ -54,7 +54,7 @@ draft ──► approved ──► implementing ──► implemented ──► 
 | 4 | Tasks | `tasks.md` | 任务 ≤ 半天粒度；每个行为任务都有前置 `[test]`；依赖与并行标注清楚 |
 | 5 | Implement（TDD） | 代码 + 测试 | 每个 `[test]` 先红、每个 `[impl]` 变绿；`npm test` 全绿；任务勾选 |
 | 6 | Verify | spec「验证记录」 | 单测/ e2e / 实机（F5、特定平台、Remote）结论写回；已知限制更新 |
-| 7 | Release | 版本 + CHANGELOG + README + tag | 三处版本一致；Release 工作流绿；见 [../CI-CD.md](../CI-CD.md) |
+| 7 | Release | 版本 + CHANGELOG + README + tag | 三处版本一致；**发版前必须获得维护者确认**（改版本号/提交/tag/push/打包不得自动执行） |
 
 ### 轻量例外（不写 spec，但仍需测试与说明）
 

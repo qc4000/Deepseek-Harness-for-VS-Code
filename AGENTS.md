@@ -62,6 +62,7 @@ Node ≥ 18。无 `npm install`、无编译：`extension.js` 就是产物。
 
 - 提交：`<type>: <中文描述>（v<版本>）`，`type ∈ feat|fix|test|docs|chore|security|merge`。
 - PR 必填：关联 spec、改动摘要、**实际测试输出**、兼容性影响、安全审查、回退方案（模板：`.github/pull_request_template.md`）。
+- **发版提交需维护者确认**：修改 `package.json` 版本号、提交版本变更、打 tag、push、打包交付前必须先征得确认，不得自动执行；日常实现/测试/文档可自行完成，交付前把待提交内容与验证结果列给用户。
 - 不提交 `.vsix`、`.dsh-debug/`、`node_modules/`、`.vscode/`。
 
 ## 8. 易错点速查

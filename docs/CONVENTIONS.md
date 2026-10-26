@@ -112,6 +112,8 @@
 
 ## 9. 版本与发布约定
 
+- **发版需维护者确认**：修改 `package.json` 版本号、提交版本变更、打 tag、push、打包交付均需先征得确认；
+  代理/贡献者不得自行发版（本地验证、测试与文档修改不受限）。
 - 语义化版本：行为变更 `MINOR`，修复 `PATCH`，不兼容变更 `MAJOR`。
 - `CHANGELOG.md` 顶部新增版本小节，按「Copilot 桥接 / 忠实窗口（面板）/ 测试」分组，用户视角描述。
 - 提交信息：`<type>: <描述>（v<版本>）`；`type ∈ feat|fix|test|docs|chore|security|merge`。
