@@ -63,8 +63,11 @@ render(view)
 标签页 URL 会把 `127.0.0.1` ↔ `localhost` 互换（`getTabDisplayUrl`），制造不同 origin。
 
 **侧栏裁剪（v1.0.1）**：面板 HTML 是 `toolbar(28px) + stage(overflow:hidden) + clip(left:-crop; width:100%+crop) + iframe(zoom)`。
-`--dsh-crop` 只写在未缩放的 `clip` 上，因此裁剪量与 `zoom` 无关；iframe 始终 `width:100%`。
-`crop = 实测侧栏宽度 + (折叠 ? 0 : 4)`（4px 避开 DSH 的 8px 拖动条热区），
+`--dsh-crop` 写在未缩放的 `clip` 上，因此裁剪量是**父容器像素**；而插件量到的是 iframe 内部逻辑像素，
+必须乘当前 `zoom` 才能对齐（否则非 1 倍字号下会露出侧栏）。iframe 始终 `width:100%`。
+`crop = round((实测侧栏宽度 + (折叠 ? 0 : 4)) × zoom)`（4px 避开 DSH 的 8px 拖动条热区）。
+面板变宽跨过 DSH 的 1024 断点时，先按 DSH 的规则（导轨 56 / 展开 264–420）预测裁剪量，
+同时向插件发 `request-layout` 请求一次权威值校正，避免动画期间侧栏露出。
 宽度由内置插件 `dsh-vscode-layout` 只读上报（`[class*="_sidebarCol"]` 的几何）。
 有效隐/显 = 手动覆盖 > `dshPanel.dshSidebar` > 宽度自适应（`< 1024` 隐藏，镜像 DSH 断点）。
 切换只改 CSS 变量，不重载 iframe。
@@ -195,7 +198,7 @@ profile 目录：`$DSH_HOME`（默认 `~/.dsh`）`/profiles/web`；插件写入
 | --- | --- | --- | --- |
 | `dsh-drop-caret` | npm（`dsh plugin add` 优先，失败 `npm pack` 解压兜底） | ≥ 0.2.3 | 拖文件 / 选中内容插入对话框光标处 |
 | `dsh-webview-clipboard` | `clipboardPluginFiles()` 以源码字符串生成 | 0.2.1 | macOS 内嵌 iframe 下 ⌘C/⌘V/⌘X 失效修复（execCommand） |
-| `dsh-vscode-layout` | `bundledPluginFiles()` 读 `dsh-plugins/` 真实文件 | 0.1.0 | 只读上报 DSH 左侧栏宽度/折叠状态（供面板视口裁剪）；`dshPanel.dshSidebar=show` 时不安装 |
+| `dsh-vscode-layout` | `bundledPluginFiles()` 读 `dsh-plugins/` 真实文件 | 0.1.1 | 只读上报 DSH 左侧栏宽度/折叠状态（供面板视口裁剪）；`dshPanel.dshSidebar=show` 时不安装 |
 | `dsh-vscode-file-links` | `dsh-plugins/` 真实文件随扩展分发 | 见插件 `package.json` | 工作区文件/文件夹链接改在 VS Code 资源管理器定位/打开 |
 
 任一插件新增/升级后：若 dsh 在运行，提示「请点击重启 dsh web 使其生效」。

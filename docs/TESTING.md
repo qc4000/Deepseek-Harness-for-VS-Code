@@ -7,7 +7,7 @@
 ## 1. 命令
 
 ```bash
-npm test                      # 语法检查 + 12 套离线单测（343 项断言）
+npm test                      # 语法检查 + 12 套离线单测（357 项断言）
 npm run test:one -- file-link # 只跑文件名含 file-link 的套件（TDD 内循环）
 npm run test:verbose          # 逐套件完整输出（看每个 ✓/✗）
 npm run test:all              # 追加真实 dsh e2e（需本机已安装 dsh）
@@ -58,7 +58,7 @@ CI 只认退出码，不看输出格式。
 | `command-execution.test.js` | 5 | `runCommandOk`/`runCommandOutput` 真实命令成功与失败；元字符注入拒绝；POSIX 无 shell / Windows 引号路径两条执行路径 |
 | `config-sanitize.test.js` | 14 | `getHost` 白名单与回退；`getPort` 整数/范围；`sanitizeCommand` 拒绝 `& \| < > ^ % ! " \` ;` 与换行；合法带空格路径保留 |
 | `dsh-model-mapping.test.js` | 38 | 条目 id/名称（改 id 会丢用户已选）；非 `dsh` 条目映射到 DSH 在册模型；provider info 字段合法（成本串/上限/capabilities/推理档位 schema）；`findMissingDshModels` 漂移检测；诊断文件落临时 HOME |
-| `dsh-sidebar.test.js` | 61 | 侧栏裁剪中继脚本（`vm` 真跑）：stage/clip 分层与缩放解耦、auto/show/hide × 宽度、280/420/56/0 与 `+4` 手柄余量、异常测量丢弃、按钮切换与上报、宿主 `toggle`/`config` 消息、未测量时不裁并上报 unavailable；测量插件文件/声明/语法/安装幂等/`show` 不安装；插件客户端仿真（握手前静默、上报、拖动重报、折叠标记、卸载清理、元素缺失不误报） |
+| `dsh-sidebar.test.js` | 75 | 侧栏裁剪中继脚本（`vm` 真跑）：stage/clip 分层与缩放解耦、auto/show/hide × 宽度、280/420/56/0 与 `+4` 手柄余量、**按 zoom 换算裁剪量**、改字号即时重算、变宽跨断点的预测与 request-layout 校正、异常测量丢弃、按钮切换与上报、宿主 `toggle`/`config` 消息、未测量时不裁并上报 unavailable；测量插件文件/声明/语法/安装幂等/`show` 不安装；插件客户端仿真（握手前静默、上报、拖动重报、折叠标记、卸载清理、元素缺失不误报） |
 | `dsh-stream-events.test.js` | 22 | `assistant/message` 只回写 text 块；旧 `text-delta` 增量；历史 `block-end` 不重复；`seq` 游标推进；`turn/end` 结束与异常原因；空事件列表安全 |
 | `file-link-bridge.test.js` | 25 | `vm` 真跑 webview 中继脚本：握手 ack（含重试）、reveal 转发、result 回传、origin/source 校验、`off` 模式不转发；`dsh-open-link` / `insert-selection` 既有中继不受影响 |
 | `file-link-client-sim.test.js` | 27 | 插件客户端仿真：未 ack 前不介入；命中按钮 → 阻断 + 发 reveal；`ok=true` 不回放 / `ok=false` 回放 / 超时回放；修饰键不接管；非链接按钮不接管；独立浏览器不打招呼；卸载后清定时器 |

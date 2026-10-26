@@ -288,7 +288,7 @@ code --install-extension deepseek-harness-vscode-<版本>.vsix
 ### 开发与测试
 
 ```bash
-npm test                    # 语法检查 + 12 套离线单测（343 项断言，无需 npm install）
+npm test                    # 语法检查 + 12 套离线单测（357 项断言，无需 npm install）
 npm run test:one -- file-link   # 只跑文件名含该子串的套件
 npm run test:all            # 追加真实 dsh 端到端（需本机已安装 dsh）
 npm run package             # 打包 .vsix

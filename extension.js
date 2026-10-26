@@ -1551,8 +1551,11 @@ ${sidebarToolbarHtml}
   var MAX_MEASURE = ${SIDEBAR_MAX_MEASURE};
   // 插件实测值（null = 尚未测量）与「测量不可用」提示状态。
   var measured = null;
+  // 最近一次「展开态」实测宽度（DSH 逻辑 px）：面板变宽跨过断点时用它预测裁剪量。
+  var lastWideWidth = 0;
   var unavailableReported = false;
   var unavailableTimer = null;
+  var MAX_CROP = MAX_MEASURE * 2;
   var hidden = computeHidden();
   function frameWindow() {
     return frame && frame.contentWindow ? frame.contentWindow : null;
@@ -1568,6 +1571,12 @@ ${sidebarToolbarHtml}
     var w = frameWindow();
     if (!w) return;
     try { w.postMessage(payload, FRAME_ORIGIN); } catch (e) { /* 页面正在切换：忽略 */ }
+  }
+
+  /** 请页面内测量插件立刻回报一次（预测后的权威校正）。 */
+  function requestLayout() {
+    if (!sidebarChrome) return;
+    postToFrame({ source: HOST_ID, type: 'request-layout' });
   }
 
   /** 面板可视宽度（裁剪前）。 */
@@ -1587,13 +1596,31 @@ ${sidebarToolbarHtml}
     return stageWidth() < NARROW;
   }
 
-  /** 需要裁掉的像素：实测侧栏宽度 + 展开态手柄余量；未测量时为 0（宁可不隐藏也不切内容）。 */
+  /**
+   * 需要裁掉的像素（父容器 px）。
+   * 注意单位：插件量到的是 **iframe 内部逻辑 px**，而 CSS zoom 只作用于 iframe，
+   * 所以一个逻辑宽度在面板上占 current 倍像素——不乘就会在非 1 倍字号下露出侧栏。
+   */
   function cropPixels() {
     if (!hidden || !measured) return 0;
     var w = Number(measured.sidebarWidth);
     if (!isFinite(w) || w <= 0) return 0;
-    var px = Math.round(w) + (measured.collapsed ? 0 : HANDLE);
-    return Math.max(0, Math.min(MAX_MEASURE, px));
+    var zoom = current > 0 ? current : 1;
+    var logical = w + (measured.collapsed ? 0 : HANDLE);
+    return Math.max(0, Math.min(MAX_CROP, Math.round(logical * zoom)));
+  }
+
+  /**
+   * 预测 DSH 在新视口下会选哪一档宽度（镜像它的 56 / 展开 / 1024 断点规则），
+   * 用于「面板变宽跨过断点」时不等测量就先把裁剪量跳到位。
+   */
+  function predictedMeasurement() {
+    var zoom = current > 0 ? current : 1;
+    var logicalViewport = (stageWidth() + cropPixels()) / zoom;
+    if (logicalViewport >= NARROW) {
+      return { sidebarWidth: lastWideWidth > 0 ? lastWideWidth : 280, collapsed: false };
+    }
+    return { sidebarWidth: 56, collapsed: true };
   }
 
   function updateToggle() {
@@ -1662,11 +1689,16 @@ ${sidebarToolbarHtml}
     toggle.addEventListener('click', function () { setHidden(!hidden, 'user'); });
   }
   window.addEventListener('resize', function () {
-    // 只有 auto 策略跟随宽度；用户手动覆盖之后不再自动改。
-    if (sidebarOverride !== null || sidebarPolicy !== 'auto') return;
-    var next = computeHidden();
-    if (next === hidden) return;
-    hidden = next;
+    // 1) auto 策略：宽度变化决定隐/显（手动覆盖之后不再自动改）。
+    if (sidebarOverride === null && sidebarPolicy === 'auto') {
+      hidden = computeHidden();
+    }
+    // 2) 仍隐藏时：DSH 会按新视口在「导轨 56 ↔ 展开」之间切换（伴随 300ms 动画），
+    //    若等测量回来再改裁剪量，侧栏会先露出来一下。这里先按 DSH 的规则预测，再请插件校正。
+    if (hidden && measured) {
+      measured = predictedMeasurement();
+      requestLayout();
+    }
     applyLayout();
     if (hidden) scheduleUnavailable();
   });
@@ -1677,6 +1709,12 @@ ${sidebarToolbarHtml}
     if (n === current) return;
     current = n;
     frame.style.zoom = String(n);
+    // 缩放变了 → 同一逻辑宽度对应的视觉像素变了：裁剪量与 DSH 的断点判定都要重算。
+    if (hidden && measured) {
+      measured = predictedMeasurement();
+      requestLayout();
+    }
+    applyLayout();
   }
   window.addEventListener('message', function (event) {
     var data = event.data;
@@ -1705,6 +1743,7 @@ ${sidebarToolbarHtml}
       // 只接受真正的有限数字且落在合理区间（展开 264-420 / 折叠 56 / 隐藏 0）。
       if (typeof width !== 'number' || !isFinite(width) || width < 0 || width > MAX_MEASURE) return;
       measured = { sidebarWidth: width, collapsed: data.collapsed === true };
+      if (!measured.collapsed && width > 0) lastWideWidth = width;
       applyLayout();
       return;
     }

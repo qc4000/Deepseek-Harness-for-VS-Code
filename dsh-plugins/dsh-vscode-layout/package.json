@@ -1,6 +1,6 @@
 {
   "name": "dsh-vscode-layout",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "DeepSeek Harness 插件：把 DSH Web 页面左侧栏的实时宽度与折叠状态上报给外层宿主（只读测量，不改页面、不拦事件），供 Deepseek-Harness-for-VS-Code 扩展做视口裁剪。",
   "keywords": [
     "deepseek",

@@ -2,6 +2,17 @@
 
 本项目遵循 [语义化版本](https://semver.org/lang/zh-CN/)。完整提交历史见 [GitHub](https://github.com/Vithrive/Deepseek-Harness-for-VS-Code/commits/main)。
 
+## 1.0.2
+
+**修复**
+
+- **非 1 倍字号下 DSH 侧栏会露出/错位**：插件量到的是 iframe 内部逻辑像素，而 `--dsh-crop` 作用在未缩放的外层，裁剪量漏乘了缩放倍率（字号 20 时少裁 66px）。现在按当前 zoom 换算，并在修改字号时立即重算（不重载面板）。
+- **面板变宽跨过 DSH 的 1024 断点时侧栏会闪一下**：改为先按 DSH 的规则（导轨 56 / 展开 264–420）预测裁剪量，同时向测量插件发 `request-layout` 请求一次权威值校正。
+
+**测试**
+
+- `test/dsh-sidebar.test.js` 扩到 75 项断言（新增：zoom 0.75/1/1.25 换算、运行时改字号重算、跨断点预测不抖动、`request-layout` 强制上报）；全量 12 套 / 357 项断言。
+
 ## 1.0.1
 
 **忠实窗口（面板）**

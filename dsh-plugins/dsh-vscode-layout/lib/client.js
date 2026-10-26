@@ -14,7 +14,7 @@ window.__ModuleLoader__.load({ id: 'dsh-vscode-layout', factory: (require) => {
   var module = { exports: {} }
   var exports = module.exports
 
-  var PLUGIN_VERSION = '0.1.0'
+  var PLUGIN_VERSION = '0.1.1'
   var HOST_ID = 'dsh-vscode-host'
   var SELF_ID = 'dsh-vscode-layout'
   var HELLO_INTERVAL_MS = 400
@@ -115,8 +115,8 @@ window.__ModuleLoader__.load({ id: 'dsh-vscode-layout', factory: (require) => {
     return { sidebarWidth: Math.round(width * 10) / 10, collapsed: isCollapsed(el) }
   }
 
-  /** 上报一次（宽度/折叠状态变化才发）。 */
-  function report() {
+  /** 上报一次（默认宽度/折叠状态变化才发；force 时无论是否变化都发）。 */
+  function report(force) {
     rafPending = false
     if (disposed || !acked) return
     var el = target
@@ -125,7 +125,7 @@ window.__ModuleLoader__.load({ id: 'dsh-vscode-layout', factory: (require) => {
     target = el
     var m = measure(el)
     if (!m) return
-    if (last && Math.abs(last.sidebarWidth - m.sidebarWidth) < MIN_DELTA && last.collapsed === m.collapsed) return
+    if (!force && last && Math.abs(last.sidebarWidth - m.sidebarWidth) < MIN_DELTA && last.collapsed === m.collapsed) return
     last = m
     post({ type: 'layout', sidebarWidth: m.sidebarWidth, collapsed: m.collapsed })
   }
@@ -135,9 +135,9 @@ window.__ModuleLoader__.load({ id: 'dsh-vscode-layout', factory: (require) => {
     if (disposed || !acked || rafPending) return
     rafPending = true
     if (typeof window.requestAnimationFrame === 'function') {
-      window.requestAnimationFrame(report)
+      window.requestAnimationFrame(function () { report(false) })
     } else {
-      window.setTimeout(report, 16)
+      window.setTimeout(function () { report(false) }, 16)
     }
   }
 
@@ -215,7 +215,8 @@ window.__ModuleLoader__.load({ id: 'dsh-vscode-layout', factory: (require) => {
       return
     }
     if (data.type === 'request-layout') {
-      schedule()
+      // 宿主刚做了预测，需要一次权威值校正：即使与上次一样也要发。
+      report(true)
     }
   }
 
