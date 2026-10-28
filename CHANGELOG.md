@@ -2,6 +2,20 @@
 
 本项目遵循 [语义化版本](https://semver.org/lang/zh-CN/)。完整提交历史见 [GitHub](https://github.com/Vithrive/Deepseek-Harness-for-VS-Code/commits/main)。
 
+## 1.0.5
+
+**忠实窗口（面板）**
+
+- **打开面板就把 DSH 工作区切到当前 VS Code 文件夹**：DSH 的「当前工作区」由页面自己恢复（上次的选择 → 最近活跃工作区），进程 cwd 与 `workspace/create` 都改不了它，所以在 A 项目用完后换到 B 项目，面板仍停在 A。现在由新增内置插件 `dsh-vscode-workspace`（可关闭）在页面侧调 DSH 公开客户端服务完成切换：已在该工作区时不动（不新建多余会话），否则先幂等注册再打开。
+- 新配置 `dshPanel.pinWorkspaceToVSCode`（默认 `true`）：关闭后不安装插件、不下发路径、不切换，行为与 1.0.4 一致；空窗口（未打开文件夹）不会把主目录钉成工作区。
+- **失败都可见**：插件装了但没重启 dsh web（8 秒无回执）、旧版 dsh 缺客户端服务、切换抛错，各有中文状态栏提示与出路（手动在 DSH 侧栏选择）。
+- `dshPanel.autoRegisterWorkspace` 的说明修正为「只登记，不改变 DSH 当前选中的工作区」。
+
+**测试**
+
+- 新增 `test/workspace-pin.test.js`（73 项）：插件声明与零干预约束、路径形状、中继协议（来源校验/超时/白名单/截断）、客户端仿真（惰性、切换、已就位、服务缺失、失败、轮询、幂等）、安装幂等。全量 15 套 / 577 项断言。
+- 规格：[006-dsh-workspace-pin](docs/sdd/specs/006-dsh-workspace-pin/spec.md)。
+
 ## 1.0.4
 
 **忠实窗口（面板）**

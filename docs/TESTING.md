@@ -66,7 +66,8 @@ CI 只认退出码，不看输出格式。
 | `file-link-diff.test.js` | 74 | 轮级 diff 宿主侧：坐标净化、匹配候选、标题（轮级 vs HEAD）、二进制/体积判定；404 三种含义（`released`/`no-record`/`unavailable`）与 `no-text` 的原因映射及各自文案；`dsh-diff` 虚拟文档存取与容量淘汰；三级降级（P1 → P0 → L0）与提示文案；git 基线（无改动/非仓库/空仓库/二进制/超大）；`handleWebviewMessage` 接单回执与非法坐标丢弃 |
 | `macos-keysim.test.js` | 24 | macOS UA 下逐键行为与 IME/修饰键过滤；Windows 与非 iframe 场景完全不激活 |
 | `remote-mode.test.js` | 15 | `isLocalLoopbackTarget`：WSL Remote 放行、SSH/Dev Container 禁用、非回环禁用；无服务时 `probeDirectIndexStatus` 安全返回 0 |
-| `workspace-file-link.test.js` | 84 | 插件文件齐全/声明/语法；中继脚本语法 + 协议字段；路径解析（相对多工作区、绝对、`../` 越界、不存在、`:12`/`#L12` 行号）；`revealAndOpen`/`revealOnly`/`off`；安装幂等且不写 `dependencies`；`diffAndOpen` 枚举与 `dsh-vscode-changes` 安装（只宿主半边、登 记 bundles、幂等、落盘语法通过） |
+| `workspace-file-link.test.js` | 84 | 插件文件齐全/声明/语法；中继脚本语法 + 协议字段；路径解析（相对多工作区、绝对、`../` 越界、不存在、`:12`/`#L12` 行号）；`revealAndOpen`/`revealOnly`/`off`；安装幂等且不写 `dependencies`；`diffAndOpen` 枚举与 `dsh-vscode-changes` 安装（只宿主半边、登记 bundles、幂等、落盘语法通过） |
+| `workspace-pin.test.js` | 73 | 工作区跟随（006）：插件包声明（`dsh.client.platform=web`、bundle patch、无依赖）与「不碰 DOM/localStorage」静态约束；`workspacePinPath`/`workspacePinEnabled`/路径形状（空窗口、开关、URL、控制字符、超长）；中继脚本独立消息 `workspace-pin`（origin/source 双校验、8s 超时上报、结果状态白名单与 reason 截断、特殊字符路径不破坏脚本）；客户端仿真（未握手惰性、`create`+`openWorkspace` 各一次、已就位不动作、服务缺失上报 unsupported、失败上报 failed、未就绪轮询、重复下发幂等、非父级消息不认）；`ensureWorkspacePlugin` 落盘/登记/幂等 |
 | `e2e-real-dsh.test.js` | — | 真实 dsh：启动参数与扩展一致；捕获 `dsh web:` 令牌；裸地址 401；经代理 200；真实 RPC 信封调用；结束清理 |
 
 ## 5. 写新测试的骨架

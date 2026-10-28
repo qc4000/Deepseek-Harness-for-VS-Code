@@ -296,6 +296,42 @@ function getWorkspaceDir() {
 }
 
 /**
+ * 该路径能否作为「要钉住的 DSH 工作区」下发。
+ * 只认非空、≤4096、无控制字符、无 scheme 的本地路径（Windows 盘符 `C:\` 不受影响）。
+ * 页面侧还会再校验一遍——两侧规则必须一致，改这里要同步插件。
+ * @param {unknown} raw
+ * @returns {boolean}
+ */
+function isValidWorkspacePinPath(raw) {
+  if (typeof raw !== 'string') return false;
+  const value = raw.trim();
+  if (value.length === 0 || value.length > 4096) return false;
+  // eslint-disable-next-line no-control-regex
+  if (/[\u0000-\u001f\u007f]/.test(value)) return false;
+  if (/^[a-z][a-z0-9+.-]*:\/\//i.test(value)) return false;
+  return true;
+}
+
+/** 是否启用「面板打开时把 DSH 工作区指向当前文件夹」。 */
+function workspacePinEnabled() {
+  return cfg().get(WORKSPACE_PIN_KEY, true) !== false;
+}
+
+/**
+ * 要钉住的工作区路径；返回空串表示不下发（开关关闭 / 空窗口 / 路径不合法）。
+ * 空窗口必须返回空串：`getWorkspaceDir()` 此时退到用户主目录，把 `~` 钉成工作区是错的。
+ * @returns {string}
+ */
+function workspacePinPath() {
+  if (!workspacePinEnabled()) return '';
+  const folders = vscode.workspace.workspaceFolders;
+  if (!folders || folders.length === 0) return '';
+  const first = folders[0];
+  const raw = first && first.uri ? first.uri.fsPath : '';
+  return isValidWorkspacePinPath(raw) ? raw : '';
+}
+
+/**
  * 探测 DSH 服务是否可访问。连接成功（任意状态码）即视为已打开。
  * @param {string} url
  * @param {number} timeoutMs
@@ -1512,7 +1548,7 @@ function jsonForScript(value) {
  * @param {'revealAndOpen'|'revealOnly'|'off'} [requestedFileLinkMode] 工作区文件链接接管开关
  * @returns {string}
  */
-function buildIframeHtml(url, scale, requestedFileLinkMode, sidebar) {
+function buildIframeHtml(url, scale, requestedFileLinkMode, sidebar, pinPathRaw) {
   // 解析显示地址，仅放行 http/https，并把其精确 origin 写入 frame-src，
   // 不再通配整个本机回环地址段，保持 webview 沙箱最小权限。
   // Remote 场景下 asExternalUri 可能返回带转发端口的 localhost 地址，也可能返回 HTTPS 转发域名，
@@ -1537,6 +1573,8 @@ function buildIframeHtml(url, scale, requestedFileLinkMode, sidebar) {
   const sidebarPolicyValue = SIDEBAR_POLICIES.includes(ui.policy) ? ui.policy : 'auto';
   const sidebarOverrideValue = typeof ui.override === 'boolean' ? ui.override : null;
   const sidebarChrome = sidebarPolicyValue !== 'show' || sidebarOverrideValue !== null;
+  // 要钉住的 DSH 工作区路径（空串 = 不下发：开关关闭 / 空窗口 / 路径不可用）。
+  const pinPath = typeof pinPathRaw === 'string' && isValidWorkspacePinPath(pinPathRaw) ? pinPathRaw : '';
   const sidebarToolbarHtml = sidebarChrome
     ? '<div id="dsh-toolbar"><button id="dsh-sidebar-toggle" type="button" aria-label="隐藏 DSH 侧栏" title="隐藏 DSH 侧栏" data-hidden="false">'
       + '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1" aria-hidden="true">'
@@ -1595,6 +1633,12 @@ ${sidebarToolbarHtml}
   var LAYOUT_ID = ${jsonForScript(LAYOUT_PLUGIN_SOURCE)};
   var FRAME_ORIGIN = ${jsonForScript(origin)};
   var fileLinkMode = ${jsonForScript(fileLinkMode)};
+  // 工作区钉住：独立消息类型（不复用 ack——文件链接插件的 layoutOnly 判别会被
+  // 新字段误判，从而丢掉 diff 模式）。
+  var WS_PIN_ID = ${jsonForScript(WORKSPACE_PLUGIN_SOURCE)};
+  var workspacePinPath = ${jsonForScript(pinPath)};
+  var PIN_TIMEOUT_MS = ${WORKSPACE_PIN_TIMEOUT_MS};
+  var PIN_REASON_MAX = ${WORKSPACE_PIN_REASON_MAX};
   // 侧栏策略：override（用户手动）> policy（配置）> 宽度自适应（与 DSH 的 1024 断点一致）。
   var sidebarChrome = ${jsonForScript(sidebarChrome)};
   var sidebarPolicy = ${jsonForScript(sidebarPolicyValue)};
@@ -1699,13 +1743,48 @@ ${sidebarToolbarHtml}
     postToFrame({ source: HOST_ID, type: 'ack', layout: true });
   }
 
+  // 工作区钉住的内联超时：插件装了但没重启 dsh web（或旧版 dsh 不加载客户端
+  // 插件）时永远收不到回执，不能让用户卡在「没指向当前目录又没任何提示」。
+  var pinTimer = null;
+  var pinSettled = false;
+  function schedulePinTimeout() {
+    if (pinTimer !== null || pinSettled || !workspacePinPath) return;
+    pinTimer = setTimeout(function () {
+      pinTimer = null;
+      if (pinSettled) return;
+      pinSettled = true;
+      try { vscode.postMessage({ type: 'dsh-workspace-pin-unavailable' }); } catch (e) { /* 面板已销毁 */ }
+    }, PIN_TIMEOUT_MS);
+  }
+  function settlePin() {
+    pinSettled = true;
+    if (pinTimer !== null) {
+      clearTimeout(pinTimer);
+      pinTimer = null;
+    }
+  }
+
+  /** 握手回执（工作区钉住）：没有目标路径时完全不下发，插件保持惰性。 */
+  function ackWorkspacePin() {
+    if (!workspacePinPath) return;
+    postToFrame({ source: HOST_ID, type: 'workspace-pin', path: workspacePinPath });
+    schedulePinTimeout();
+  }
+
   function ackFrame() {
     ackFileLinks();
     ackLayout();
+    ackWorkspacePin();
   }
   if (frame) {
     // iframe 每次加载（刷新 / 重启 dsh web）后重新握手，兼容插件先于或后于本脚本就绪。
     frame.addEventListener('load', function () {
+      // 页面重载 = 重新开始计「插件未生效」的等待窗口。
+      pinSettled = false;
+      if (pinTimer !== null) {
+        clearTimeout(pinTimer);
+        pinTimer = null;
+      }
       ackFrame();
       setTimeout(ackFrame, 600);
       setTimeout(ackFrame, 2000);
@@ -1735,6 +1814,24 @@ ${sidebarToolbarHtml}
   window.addEventListener('message', function (event) {
     var data = event.data;
     if (!data) return;
+    if (data.source === WS_PIN_ID) {
+      // 工作区钉住插件：与其它插件同一套来源校验（本面板 iframe + DSH origin）。
+      if (!fromOurFrame(event)) return;
+      if (data.type === 'hello') {
+        ackWorkspacePin();
+        return;
+      }
+      if (data.type === 'workspace-pin-result') {
+        // 状态白名单：只转发扩展认识的四种，其余丢弃（不让页面自定义宿主提示）。
+        var status = data.status;
+        if (status !== 'done' && status !== 'already' && status !== 'unsupported' && status !== 'failed') return;
+        settlePin();
+        var report = { type: 'dsh-workspace-pin-result', status: status };
+        if (typeof data.reason === 'string' && data.reason !== '') report.reason = data.reason.slice(0, PIN_REASON_MAX);
+        try { vscode.postMessage(report); } catch (e) { /* 面板已销毁 */ }
+      }
+      return;
+    }
     if (data.source === PLUGIN_ID) {
       // DSH 页面内插件发来的消息：只认自己那个 iframe、且 origin 必须是 DSH 地址。
       if (!fromOurFrame(event)) return;
@@ -1898,9 +1995,24 @@ const SIDEBAR_MAX_MEASURE = 1024;
 const SIDEBAR_POLICY_KEY = 'dshPanel.dshSidebar';
 const SIDEBAR_POLICIES = ['auto', 'show', 'hide'];
 const SIDEBAR_OVERRIDE_KEY = 'dsh.ui.dshSidebarHidden';
+// 内置工作区钉住插件（源码在 dsh-plugins/，随扩展直接写入 DSH web profile，不经 npm）：
+// 面板加载后把 DSH 当前工作区切到 VS Code 正在打开的文件夹。DSH 的「选中工作区」
+// 由页面自己恢复（客户端持久选择 → 最近活跃工作区），进程 cwd 与 workspace/create
+// 都改不了它，因此必须由页面内的客户端插件调公开服务完成。
+const WORKSPACE_PLUGIN_NAME = 'dsh-vscode-workspace';
+const WORKSPACE_PLUGIN_SOURCE = 'dsh-vscode-workspace';
+const WORKSPACE_PIN_KEY = 'dshPanel.pinWorkspaceToVSCode';
+// 面板加载后这么久还没收到插件回执：视为「插件未生效」（装了没重启 dsh web /
+// 旧版 dsh 不加载客户端插件），给一次可见提示。
+const WORKSPACE_PIN_TIMEOUT_MS = 8000;
+// 中继回传的结果原因上限（与插件侧一致），避免把整段堆栈塞进提示。
+const WORKSPACE_PIN_REASON_MAX = 200;
 
 /** 测量不可用的提示是否已弹过（每窗口只提醒一次）。 */
 let sidebarUnavailableNotified = false;
+/** 工作区跟随的失败提示（插件未生效 / 旧版不支持 / 切换失败）各只提醒一次。 */
+let workspacePinUnavailableNotified = false;
+let workspacePinFailureNotified = false;
 let dshModelDriftChecked = false;
 
 function dshHomeDir() {
@@ -2297,6 +2409,14 @@ function ensureLayoutPlugin(profileDir) {
 }
 
 /**
+ * 确保内置工作区钉住插件已落盘并声明（不经 npm）。
+ * 只有客户端半边干活：把 DSH 当前工作区切到宿主正在打开的文件夹。
+ */
+function ensureWorkspacePlugin(profileDir) {
+  return ensureBundledPlugin(profileDir, WORKSPACE_PLUGIN_NAME, '工作区跟随');
+}
+
+/**
  * 确保内置轮级变更插件已落盘并声明（不经 npm）。
  * 仅宿主半边：把每轮两侧文件内容出口成一条鉴权路由，供 diffAndOpen 模式用。
  */
@@ -2389,6 +2509,13 @@ async function ensureDshPlugins() {
     // 其它模式不安装——不取轮级数据时没有任何用处。
     if (isDiffMode(fileLinkAction())) {
       if (await ensureChangesPlugin(profileDir)) {
+        changed = true;
+      }
+    }
+    // 内置工作区钉住插件：面板加载后把 DSH 当前工作区切到 VS Code 文件夹。
+    // 开关关闭时不安装/不更新——插件不握手，面板行为与本能力之前完全一致。
+    if (workspacePinEnabled()) {
+      if (await ensureWorkspacePlugin(profileDir)) {
         changed = true;
       }
     }
@@ -2939,6 +3066,25 @@ function handleWebviewMessage(msg, webview) {
         8000
       );
     }
+  } else if (msg && msg.type === 'dsh-workspace-pin-unavailable') {
+    // 插件没回执：通常意味着「刚装上但没重启 dsh web」或旧版 dsh 不加载客户端插件。
+    if (!workspacePinUnavailableNotified) {
+      workspacePinUnavailableNotified = true;
+      vscode.window.setStatusBarMessage(
+        '未能自动切换到当前工作区（dsh 插件未生效，可点「重启 dsh web」后重试；也可在 DSH 侧栏手动选择工作区）',
+        8000
+      );
+    }
+  } else if (msg && msg.type === 'dsh-workspace-pin-result' && msg.status !== 'done' && msg.status !== 'already') {
+    // 切换失败 / 旧版 dsh：必须让用户看见，并给出下一步（禁止静默降级）。
+    if (!workspacePinFailureNotified) {
+      workspacePinFailureNotified = true;
+      const reason = typeof msg.reason === 'string' ? msg.reason.slice(0, WORKSPACE_PIN_REASON_MAX) : '';
+      const text = msg.status === 'unsupported'
+        ? '当前 dsh 版本不支持自动切换工作区，请在 DSH 侧栏手动选择工作区。'
+        : `自动切换到当前 VS Code 工作区失败：${reason || '未知原因'}。请在 DSH 侧栏手动选择工作区。`;
+      vscode.window.setStatusBarMessage(text, 8000);
+    }
   }
 }
 
@@ -3005,7 +3151,7 @@ async function preparePanelHtml(isTab) {
   const pluginInstalled = await ensureDshPlugins();
   if (pluginInstalled && (await checkUrl(getUrl()))) {
     // 服务已在运行但插件刚装上，需重启 dsh web 才加载。
-    vscode.window.showInformationMessage('已自动安装/更新 DSH 插件（dsh-drop-caret / dsh-webview-clipboard / dsh-vscode-file-links / dsh-vscode-layout），请点击面板顶部的「重启 dsh web」使其生效。');
+    vscode.window.showInformationMessage('已自动安装/更新 DSH 插件（dsh-drop-caret / dsh-webview-clipboard / dsh-vscode-file-links / dsh-vscode-layout / dsh-vscode-workspace），请点击面板顶部的「重启 dsh web」使其生效。');
   }
 
   const ok = await ensureRunningOnce();
@@ -3036,7 +3182,7 @@ async function preparePanelHtml(isTab) {
     };
   }
   try {
-    return { ok: true, html: buildIframeHtml(target.displayUrl, getFontScale(), fileLinkAction(), sidebarUiState()) };
+    return { ok: true, html: buildIframeHtml(target.displayUrl, getFontScale(), fileLinkAction(), sidebarUiState(), workspacePinPath()) };
   } catch (e) {
     // 显示地址无法解析或协议不是 http/https 时，拒绝加载 iframe 并展示错误页。
     return { ok: false, kind: 'unloadable', reason: e.message };
@@ -4810,7 +4956,7 @@ function activate(context) {
       }
       view.description = getUrl();
       try {
-        view.webview.html = buildIframeHtml(target.displayUrl, getFontScale(), fileLinkAction(), sidebarUiState());
+        view.webview.html = buildIframeHtml(target.displayUrl, getFontScale(), fileLinkAction(), sidebarUiState(), workspacePinPath());
       } catch (e) {
         view.description = '无法加载';
         view.webview.html = buildErrorHtml(e.message);
@@ -4948,6 +5094,14 @@ module.exports.__internals = {
   FILE_LINK_ACTIONS,
   ensureLayoutPlugin,
   LAYOUT_PLUGIN_NAME,
+  ensureWorkspacePlugin,
+  WORKSPACE_PLUGIN_NAME,
+  WORKSPACE_PLUGIN_SOURCE,
+  WORKSPACE_PIN_KEY,
+  WORKSPACE_PIN_TIMEOUT_MS,
+  workspacePinEnabled,
+  workspacePinPath,
+  isValidWorkspacePinPath,
   ensureChangesPlugin,
   sidebarPolicy,
   sidebarUiState,

@@ -9,12 +9,12 @@
 
 - **忠实窗口**：把 DSH Web GUI 原样内嵌到侧边栏/标签页；自动安装、启动、探测、认证 dsh；Remote 走端口转发。
 - **Copilot 桥接**：把 DSH 注册为聊天模型（`vendor: dsh`），滤除 VS Code 注入的噪音，按转录增量转发并流式回写。
-- **配套插件**（随包分发、可关闭）：`dsh-vscode-file-links`（对话内工作区链接改在资源管理器打开）、`dsh-vscode-layout`（只读上报侧栏宽度，供面板视口裁剪）、内置 `dsh-webview-clipboard`、npm 包 `dsh-drop-caret`。
+- **配套插件**（随包分发、可关闭）：`dsh-vscode-file-links`（对话内工作区链接改在资源管理器打开）、`dsh-vscode-layout`（只读上报侧栏宽度，供面板视口裁剪）、`dsh-vscode-workspace`（面板打开时把 DSH 工作区切到当前 VS Code 文件夹）、`dsh-vscode-changes`（轮级变更两侧全文，仅宿主半边）、内置 `dsh-webview-clipboard`、npm 包 `dsh-drop-caret`。
 
 ## 2. 命令
 
 ```bash
-npm test                      # 语法检查 + 12 套离线单测（343 项断言；无需 npm install）
+npm test                      # 语法检查 + 15 套离线单测（577 项断言；无需 npm install）
 npm run test:one -- <子串>    # 只跑匹配的套件（TDD 内循环）
 npm run test:all              # 追加真实 dsh e2e（需本机已装 dsh）
 npm run package               # 打 .vsix
@@ -71,6 +71,8 @@ Node ≥ 18。无 `npm install`、无编译：`extension.js` 就是产物。
 - Windows 必须 `shell: true`、POSIX 必须无 shell：两端规则不同，别「统一简化」。
 - 标签页接管时侧边栏必须让位（DSH 前端在 webview 双实例下互斥）。
 - 只认 `assistant/chunk` 会让 Copilot「已提交但无回答」→ 必须同时认 `assistant/message`。
+- 新插件不得复用中继的 `ack` 消息类型（会被 `dsh-vscode-file-links` 的 `layoutOnly` 误判，吞掉 diff 模式）→ 用独立类型。
+- `workspace/create` 或进程 `cwd` 改不了 DSH 当前工作区（选中态在页面里）→ 由 `dsh-vscode-workspace` 调 `ctx.uiWorkspace.openWorkspace`。
 - 模型映射用 DSH 在册 id（如 `deepseek-flash`），失配由 `checkDshModelDrift` 告警。
 - 新增非运行时目录必须同步 `.vscodeignore`，否则会被打进 `.vsix`。
 - 完整历史事故清单：[CONVENTIONS · 历史坑](docs/CONVENTIONS.md#10-历史坑回归清单)。

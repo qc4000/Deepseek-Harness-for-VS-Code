@@ -138,6 +138,8 @@
 | 全对话拼接做去重签名 | 拖入新文件被误判为重复投递 | 附件签名只取**最后一条**用户消息 |
 | 新增文件忘记 `.vscodeignore` | 文档/脚本被打进 `.vsix` | 新增非运行时目录时同步更新 `.vscodeignore` |
 | 在 webview 里直连 dsh 裸地址 | 新版 dsh 401（SameSite=Strict Cookie 不随第三方 iframe 发送） | 走受管认证代理；仅在回环 + 非真远程场景启用 |
+| 新插件复用中继的 `ack` 消息类型 | `dsh-vscode-file-links` 的 `layoutOnly` 判别被新字段误判，`diffMode` 被覆盖成 false，之后所有点击只开原文 | 新插件用独立消息类型（`workspace-pin` / `workspace-pin-result`）；`ack` 只留既有语义 |
+| 以为 `workspace/create` 或进程 `cwd` 能改变 DSH 当前工作区 | 面板打开仍停在旧项目（`recentWorkspace()` 按最近活动选） | 选中态在页面里：由客户端插件调 `ctx.workspaces.create` + `ctx.uiWorkspace.openWorkspace`（006） |
 
 ## 11. 禁止事项
 

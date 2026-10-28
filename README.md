@@ -68,7 +68,8 @@
 | `dshPanel.url` | `http://127.0.0.1:3080` | 面板连接的 DSH 地址 |
 | `dshPanel.host` / `dshPanel.port` | `127.0.0.1` / `3080` | 自动启动时绑定的主机与端口 |
 | `dshPanel.autoStart` | `true` | 未运行时是否自动启动 dsh |
-| `dshPanel.autoRegisterWorkspace` | `true` | 是否把当前工作区自动注册为 DSH 工作区 |
+| `dshPanel.autoRegisterWorkspace` | `true` | 是否把当前工作区登记到 DSH 工作区列表（幂等；只登记，不改变 DSH 当前选中的工作区） |
+| `dshPanel.pinWorkspaceToVSCode` | `true` | 面板打开时把 DSH 当前工作区切到 VS Code 正在打开的文件夹（自动安装配套插件 `dsh-vscode-workspace`）；已在该工作区时不动，关闭后不安装插件、不切换 |
 | `dshPanel.autoInstallDsh` | `true` | 未安装 dsh 时是否提示并代为安装 |
 | `dshPanel.dshCommand` | `dsh` | dsh 命令（可填完整路径） |
 | `dshPanel.killOnDispose` | `true` | 扩展停用时是否结束它启动的 dsh |
@@ -291,7 +292,7 @@ DSH：用自己的一套 harness（记忆 / 技能 / AGENTS.md / 工具 / agent 
 - 两条能力线：**忠实窗口**（把 DSH Web GUI 原样内嵌到侧边栏 / 编辑器标签页）与 **Copilot 桥接**（把 DSH 注册为 VS Code 聊天模型）——桥接仍在持续跟进 DeepSeek 模型与 dsh 版本演进，遇到不一致会在扩展内明确告警而不是静默降级；
 - 欢迎大家在不同操作系统（Windows / macOS / Linux，以及 Remote-SSH、WSL、Dev Containers 等远程场景）中测试使用；
 - 如遇问题请在 [GitHub Issues](https://github.com/Vithrive/Deepseek-Harness-for-VS-Code/issues) 提出，作者会尽快回复和改进；
-- 再次强调：**Copilot 桥接不影响「忠实窗口」形态**——面板始终忠实呈现 DSH Web GUI，不对页面注入、改写或拦截任何东西，也不干涉你对 DSH 的插件开发与界面定制。（唯二的例外是两个可关闭的配套插件：修复 macOS 剪贴板快捷键的 `dsh-webview-clipboard`，以及把对话里的工作区文件链接改接到 VS Code 资源管理器的 `dsh-vscode-file-links`，两者都由本扩展随包分发、可一键关闭。）
+- 再次强调：**Copilot 桥接不影响「忠实窗口」形态**——面板始终忠实呈现 DSH Web GUI，不对页面注入、改写或拦截任何东西，也不干涉你对 DSH 的插件开发与界面定制。（例外只有几个可关闭的配套插件：修复 macOS 剪贴板快捷键的 `dsh-webview-clipboard`、把对话里的工作区文件链接改接到 VS Code 资源管理器的 `dsh-vscode-file-links`、把 DSH 当前工作区跟随 VS Code 文件夹的 `dsh-vscode-workspace`，以及供两者使用的布局测量/轮级变更插件 `dsh-vscode-layout` / `dsh-vscode-changes`；全部由本扩展随包分发、可一键关闭。）
 
 ---
 
