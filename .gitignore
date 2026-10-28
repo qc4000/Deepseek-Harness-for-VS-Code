@@ -3,3 +3,9 @@ node_modules/
 *.log
 .DS_Store
 *.vsix
+# DSH 本机运行时（dsh-git-rollback 的 .dsh/rollback 检查点等）不进仓库。
+# 用 .dsh/* 而非 .dsh/：目录整体被忽略后 git 不会下探，下面的 ! 规则会失效。
+.dsh/*
+# 项目级 skill 要入库：DSH 扫描 <项目根>/.dsh/skills（rank 100）。
+!.dsh/skills/
+.dsh-debug/
