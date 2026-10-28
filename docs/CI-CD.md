@@ -61,10 +61,15 @@ Windows 本地验证包内容可用 `tar -tf`（Windows 10+ 自带 bsdtar）或�
    git push origin v1.0.0
    ```
 
-5. **Release 工作流自动**：测试 → 版本校验 → 打包 → GitHub Release（附 `.vsix`，自动生成 release notes）。
-6. **Marketplace（可选）**：仓库 Secrets 里配置 `VSCE_PAT` 后，同一工作流会执行
+5. **Release 工作流自动**：测试 → 版本校验 → 打包 → GitHub Release（附 `.vsix`）。
+6. **发布说明按 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 规范写**（`--generate-notes` 只作底稿，不要直接发布）：
+   - 只列有内容的分类：`新增 (Added)` / `变更 (Changed)` / `弃用 (Deprecated)` / `移除 (Removed)` / `修复 (Fixed)` / `安全 (Security)`；
+   - 每条写**对用户的影响**（配置项、可见行为、升级动作），不堆 commit 摘要；
+   - 已知问题 / 升级提示用引用块（`>`）单列，不混进分类；
+   - 文末保留 `**Full Changelog**: …/compare/v<上一版>...v<当前版>`（GitHub 自动生成的同名链接格式）。
+7. **Marketplace（可选）**：仓库 Secrets 里配置 `VSCE_PAT` 后，同一工作流会执行
    `vsce publish --packagePath`；未配置则跳过（GitHub Release 仍可用）。
-7. **发布后验证**：下载 Release 里的 `.vsix`，`code --install-extension <file>`，
+8. **发布后验证**：下载 Release 里的 `.vsix`，`code --install-extension <file>` ，
    打开面板确认能启动 dsh、Copilot 模型选择器出现 DSH 条目。
 
 > 手动发布（不经 Actions）也可：`npm run package` → `code --install-extension <vsix>` 自测 →
