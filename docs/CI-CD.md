@@ -89,6 +89,8 @@ Windows 本地验证包内容可用 `tar -tf`（Windows 10+ 自带 bsdtar）或�
 | 仅某平台失败 | 多为路径/`shell`/大小写差异；在该平台语义下修正实现或断言，不要 `skip` |
 | 打包校验失败 | `.vscodeignore` 漏配（混入非运行时文件）或漏掉运行时文件（`dsh-plugins/`、`media/`） |
 | Release 版本校验失败 | tag 与 `package.json.version` 不一致；删除错误 tag（`git tag -d` + `git push origin :vX`）后重打 |
+| 一次 push 多个 tag，只跑了一个（或一个都没跑） | GitHub 对同一次 push 里的多个 tag 不可靠（实测 4 个 tag 一次推送 0 个 run）；而 `workflow_dispatch` 需要 `actions:write`，普通 PAT 常缺。逐个重推：`git push origin :refs/tags/vX && git push origin vX`，每个 tag 独立触发 |
+| 多个 Release 里 `Latest` 标到了旧版本 | `gh release create` 不重置 Latest，它跟随最后完成的那个 | `gh release edit v<新版本> --latest` 手动指回 |
 | Marketplace 发布失败 | PAT 过期/权限不足/版本已存在（Marketplace 不允许覆盖同一版本，必须提升版本号） |
 
 **回滚策略**：Marketplace 上的版本不能覆盖，只能发布更高版本修复（或在市场页 unpublish）；
