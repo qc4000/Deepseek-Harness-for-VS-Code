@@ -369,6 +369,59 @@ function httpPostJson(url, payload, timeoutMs = 5000) {
 }
 
 /**
+ * 向 DSH 的 /api 端点发送 GET 并解析 JSON（轮级变更取数用）。
+ * 非 2xx 一律 reject，错误对象带 `status` 供调用方区分「路由不存在」与「取数失败」。
+ * @param {string} url
+ * @param {number} timeoutMs
+ * @returns {Promise<any>}
+ */
+function httpGetJson(url, timeoutMs = 5000) {
+  return new Promise((resolve, reject) => {
+    let target;
+    try {
+      target = new URL(url);
+    } catch (e) {
+      reject(e);
+      return;
+    }
+    const lib = target.protocol === 'https:' ? https : http;
+    const req = lib.get({
+      hostname: target.hostname,
+      port: target.port || (target.protocol === 'https:' ? 443 : 80),
+      path: target.pathname + target.search,
+      method: 'GET',
+      headers: { Accept: 'application/json' }
+    }, (res) => {
+      let body = '';
+      res.setEncoding('utf8');
+      res.on('data', (c) => {
+        body += c;
+        // 上限同理：超过单侧上限的响应不可能用来造 diff。
+        if (body.length > 2 * MAX_DIFF_SIDE_BYTES) req.destroy(new Error('response too large'));
+      });
+      res.on('end', () => {
+        if (res.statusCode < 200 || res.statusCode >= 300) {
+          const err = new Error('HTTP ' + res.statusCode);
+          err.status = res.statusCode;
+          // 保留响应体：轮级路由用 404 的 error 码区分「插件没装/结构不符」
+          // 与「会话已释放/该轮没记录」，文案不同（spec 005 第 8 节）。
+          err.body = body;
+          reject(err);
+          return;
+        }
+        try {
+          resolve(JSON.parse(body || 'null'));
+        } catch (e) {
+          reject(new Error('响应不是 JSON'));
+        }
+      });
+    });
+    req.on('error', reject);
+    req.setTimeout(timeoutMs, () => req.destroy(new Error('timeout')));
+  });
+}
+
+/**
  * 判断是否为 VS Code 注入的"非对话"内容块（系统提示词/环境信息/上下文提醒等）。
  * @param {string} t
  * @returns {boolean}
@@ -1636,7 +1689,8 @@ ${sidebarToolbarHtml}
   /** 握手回执（文件链接）：插件据此确认「外层是本 VS Code 面板」，off 时保持惰性。 */
   function ackFileLinks() {
     if (fileLinkMode === 'off') return;
-    postToFrame({ source: HOST_ID, type: 'ack', fileLinks: true, mode: fileLinkMode });
+    // diff 模式额外告知：点击时会带「会话 + 轮」坐标，插件据此才去取。
+    postToFrame({ source: HOST_ID, type: 'ack', fileLinks: true, mode: fileLinkMode, diff: fileLinkMode === 'diffAndOpen' });
   }
 
   /** 握手回执（侧栏测量）：show 且无手动覆盖时完全不介入。 */
@@ -1690,11 +1744,21 @@ ${sidebarToolbarHtml}
       }
       if (data.type === 'reveal' && fileLinkMode !== 'off' && typeof data.token === 'string' && typeof data.path === 'string') {
         // 点击了工作区文件/文件夹链接：交给扩展宿主去资源管理器里定位并打开。
-        vscode.postMessage({
+        var reveal = {
           type: 'dsh-reveal-path',
           token: data.token.slice(0, 64),
           path: data.path.slice(0, 4096)
-        });
+        };
+        // 轮坐标只用于在 DSH 的「已记录清单」里查，不参与路径拼接；
+        // 只有 diff 模式才送（其它模式宿主要么不认，要么不取），字段不合规就整条丢掉。
+        var change = fileLinkMode === 'diffAndOpen' ? data.change : null;
+        if (change && typeof change === 'object'
+            && typeof change.sessionId === 'string' && change.sessionId.length > 0 && change.sessionId.length <= 128
+            && typeof change.turn === 'number' && isFinite(change.turn)
+            && Math.floor(change.turn) === change.turn && change.turn >= 1 && change.turn <= 1000000) {
+          reveal.change = { sessionId: change.sessionId, turn: change.turn };
+        }
+        vscode.postMessage(reveal);
       }
       return;
     }
@@ -1706,6 +1770,12 @@ ${sidebarToolbarHtml}
       if (typeof width !== 'number' || !isFinite(width) || width < 0 || width > MAX_MEASURE) return;
       measured = { sidebarWidth: width, collapsed: data.collapsed === true };
       applyLayout();
+      return;
+    }
+    if (data.type === 'dsh-reveal-accepted' && typeof data.token === 'string') {
+      // 扩展宿主已接单（轮级取数可能较慢）：通知页面把这次等待放宽，避免超时
+      // 回放导致「diff 与 DSH 侧栏同时打开」。
+      postToFrame({ source: HOST_ID, type: 'reveal-ack', token: data.token.slice(0, 64) });
       return;
     }
     if (data.type === 'dsh-reveal-result' && typeof data.token === 'string') {
@@ -1793,9 +1863,25 @@ const BUNDLED_PLUGINS_DIR = 'dsh-plugins';
 // DSH 页面（iframe）与 webview 之间的握手 / 转发协议标识。
 const VSCODE_HOST_ID = 'dsh-vscode-host';
 const FILE_LINK_PLUGIN_SOURCE = 'dsh-vscode-file-links';
-// 文件链接点击行为：资源管理器定位 + 打开文件 / 仅定位 / 不接管（保持 DSH 行为）。
+// 文件链接点击行为：资源管理器定位 + 打开文件 / 定位 + 展示变更 diff / 仅定位 /
+// 不接管（保持 DSH 行为）。
 const FILE_LINK_ACTION_KEY = 'dshPanel.workspaceFileLinkAction';
-const FILE_LINK_ACTIONS = ['revealAndOpen', 'revealOnly', 'off'];
+const FILE_LINK_ACTIONS = ['revealAndOpen', 'diffAndOpen', 'revealOnly', 'off'];
+// 轮级变更数据的出口插件（源码在 dsh-plugins/，随扩展直接写入 DSH web profile）：
+// 在 DSH 进程内把「该轮开始/结束」的两侧全文取出来，供 VS Code 并排 diff。
+const CHANGES_PLUGIN_NAME = 'dsh-vscode-changes';
+const CHANGES_ROUTE = '/api/dsh-vscode.changes-file';
+// 单侧文本上限：超过就不造 diff（避免把超大文件读进内存与虚拟文档）。
+const MAX_DIFF_SIDE_BYTES = 1024 * 1024;
+// 点击后客户端最多等这么久（收到 reveal-ack 才放宽）；超时由页面回放原始点击。
+const DIFF_TIMEOUT_MS = 6000;
+// 轮级取数（本机 HTTP，经认证代理）与 git 命令各自的上限。
+const TURN_CHANGE_TIMEOUT_MS = 1500;
+const GIT_TIMEOUT_MS = 4000;
+// 虚拟文档：dsh-diff:<序号>/<名称>，内容只存在内存里。
+const DIFF_SCHEME = 'dsh-diff';
+const DIFF_DOC_MAX_ENTRIES = 64;
+const DIFF_DOC_MAX_BYTES = 8 * 1024 * 1024;
 // 内置布局测量插件（源码在 dsh-plugins/，随扩展直接写入 DSH web profile，不经 npm）：
 // 只读上报 DSH 左侧栏宽度与折叠状态，供面板做父容器视口裁剪。
 const LAYOUT_PLUGIN_NAME = 'dsh-vscode-layout';
@@ -2140,7 +2226,13 @@ function bundledPluginFiles(name) {
   const rels = ['package.json', 'cordis.patch.yml', 'lib/index.js', 'lib/client.js'];
   const files = {};
   for (const rel of rels) {
-    files[rel] = fs.readFileSync(path.join(base, rel), 'utf8');
+    try {
+      files[rel] = fs.readFileSync(path.join(base, rel), 'utf8');
+    } catch (e) {
+      // 只有宿主半边的插件（如 dsh-vscode-changes）没有 lib/client.js：跳过即可；
+      // package.json 是版本单一源头，缺失属于打包错误。
+      if (rel === 'package.json') throw e;
+    }
   }
   return files;
 }
@@ -2202,6 +2294,14 @@ function ensureFileLinkPlugin(profileDir) {
 /** 确保内置布局测量插件已落盘并声明（不经 npm）。 */
 function ensureLayoutPlugin(profileDir) {
   return ensureBundledPlugin(profileDir, LAYOUT_PLUGIN_NAME, '布局测量');
+}
+
+/**
+ * 确保内置轮级变更插件已落盘并声明（不经 npm）。
+ * 仅宿主半边：把每轮两侧文件内容出口成一条鉴权路由，供 diffAndOpen 模式用。
+ */
+function ensureChangesPlugin(profileDir) {
+  return ensureBundledPlugin(profileDir, CHANGES_PLUGIN_NAME, '变更对比');
 }
 
 /**
@@ -2282,6 +2382,13 @@ async function ensureDshPlugins() {
     // 供面板做视口裁剪；show 策略（不启用隐藏）时不安装/不更新。
     if (shouldInstallLayoutPlugin()) {
       if (await ensureLayoutPlugin(profileDir)) {
+        changed = true;
+      }
+    }
+    // 内置轮级变更插件（仅宿主半边）：为 diffAndOpen 模式提供「该轮两侧全文」。
+    // 其它模式不安装——不取轮级数据时没有任何用处。
+    if (isDiffMode(fileLinkAction())) {
+      if (await ensureChangesPlugin(profileDir)) {
         changed = true;
       }
     }
@@ -2391,13 +2498,371 @@ function replyRevealResult(webview, token, ok) {
   }
 }
 
+// =====================================================================
+// 轮级变更 diff（规格 005）
+// 三级降级：P1 轮级（dsh-vscode-changes 路由取两侧全文）→ P0 git HEAD ↔
+// 工作树 → L0 普通打开（1.1.x 行为）。任何一级失败都不阻断点击，只降级并提示。
+// =====================================================================
+
+let diffDocSeq = 0;
+let diffDocBytes = 0;
+const diffDocs = new Map(); // 'dsh-diff:/<n>/<name>' -> { text, bytes }
+let diffProviderRegistered = false;
+// 仅测试钩子：替换「取轮级变更」与「取 HEAD 基线」两处外部依赖。
+let diffDepsOverride = null;
+
+/** 是否 diff 模式（定位 + 展示变更）。 */
+function isDiffMode(action) {
+  return action === 'diffAndOpen';
+}
+
+/** 文本/字节里是否含 NUL（二进制信号）；只看前 8 KiB。 */
+function hasNulByte(value) {
+  if (typeof value === 'string') return value.indexOf('\u0000') >= 0;
+  if (!value || typeof value.length !== 'number') return false;
+  const n = Math.min(value.length, 8192);
+  for (let i = 0; i < n; i += 1) {
+    if (value[i] === 0) return true;
+  }
+  return false;
+}
+
+/**
+ * 净化插件发来的轮坐标：只接受「会话 id + 正整数轮次」，其余一律丢弃。
+ * 坐标只用于在已记录清单里查，不参与任何路径拼接。
+ * @param {unknown} raw
+ * @returns {{sessionId: string, turn: number} | null}
+ */
+function sanitizeChangeCoord(raw) {
+  if (!raw || typeof raw !== 'object') return null;
+  // 控制字符检查看原文（trim 会把 \n 裁掉，不能因此放过）。
+  const rawSid = typeof raw.sessionId === 'string' ? raw.sessionId : '';
+  const sid = rawSid.trim();
+  if (sid === '' || sid.length > 128 || /[\u0000-\u001f\u007f]/.test(rawSid)) return null;
+  const turn = Number(raw.turn);
+  if (!Number.isSafeInteger(turn) || turn < 1 || turn > 1000000) return null;
+  return { sessionId: sid, turn: turn };
+}
+
+/**
+ * 路径匹配候选：相对/绝对写法都试一遍（DSH 记录的 path 相对 cwd，display 可能带 ~/../）。
+ * 与插件 side 的同名函数保持同一语义。
+ * @param {string} cwd
+ * @param {string} p
+ * @returns {string[]}
+ */
+function normalizeChangeCandidates(cwd, p) {
+  const out = [];
+  const push = (v) => {
+    if (typeof v !== 'string') return;
+    const s = v.replace(/\\/g, '/').replace(/^\.\//, '');
+    // 不丢 `..` 开头的候选：工作区上方文件在 DSH 的记录里正是以 `../x` 作 display。
+    if (s === '' || out.includes(s)) return;
+    out.push(s);
+  };
+  const raw = typeof p === 'string' ? p : '';
+  push(raw);
+  const abs = isAbsoluteLinkPath(raw) ? raw : (cwd ? path.resolve(cwd, raw) : '');
+  if (abs) {
+    push(abs.replace(/\\/g, '/'));
+    if (cwd) {
+      const rel = path.relative(cwd, abs).replace(/\\/g, '/');
+      if (rel !== '' && !rel.startsWith('..')) push(rel);
+    }
+  }
+  return out.slice(0, 8);
+}
+
+/**
+ * diff 标签页标题：两种数据源必须一眼可区分（避免把「与 HEAD」误当成该轮）。
+ * 轮次文案对外统一为「第 N 轮」（对应 DSH 协议里的 `turn`）。
+ * @param {string} label 文件路径或 display
+ * @param {'turn'|'head'} kind
+ * @param {number} [turn]
+ * @returns {string}
+ */
+function buildDiffTitle(label, kind, turn) {
+  const base = String(label || '').replace(/\\/g, '/').split('/').pop();
+  const name = (base && base.slice(0, 80)) || '文件';
+  if (kind === 'turn') return name + ' · 第 ' + (Number(turn) || 0) + ' 轮';
+  return name + ' · 与 HEAD 的差异';
+}
+
+/** 路由响应里的一侧：text / absent（空）/ binary / oversized。 */
+function readChangeSide(side) {
+  if (!side || typeof side !== 'object') return { kind: 'invalid' };
+  if (side.kind === 'absent') return { kind: 'text', text: '' };
+  if (side.kind === 'text' && typeof side.text === 'string') return { kind: 'text', text: side.text };
+  if (side.kind === 'binary') return { kind: 'binary' };
+  if (side.kind === 'oversized') return { kind: 'oversized' };
+  return { kind: 'invalid' };
+}
+
+/**
+ * 校验插件路由的响应体；任何字段不合规都当作「不可用」交给降级链。
+ * @param {unknown} body
+ * @returns {{ok: true, turn: number, display: string, before: string, after: string} | {ok: false, reason: string, turn?: number}}
+ */
+function parseTurnChangeResponse(body) {
+  if (!body || typeof body !== 'object') return { ok: false, reason: 'invalid' };
+  const turn = Number(body.turn);
+  const turnOk = Number.isSafeInteger(turn) && turn >= 1;
+  if (body.matched !== true) return { ok: false, reason: 'no-change', turn: turnOk ? turn : undefined };
+  if (!turnOk) return { ok: false, reason: 'invalid' };
+  // 插件确认该轮改过它、但拿不到两侧全文（典型：shell 直接改动，没有文件工具钩子）。
+  if (body.unavailable === 'no-text') return { ok: false, reason: 'no-text', turn: turn };
+  const before = readChangeSide(body.before);
+  const after = readChangeSide(body.after);
+  if (before.kind === 'binary' || after.kind === 'binary') return { ok: false, reason: 'binary', turn: turn };
+  if (before.kind === 'oversized' || after.kind === 'oversized') return { ok: false, reason: 'oversized', turn: turn };
+  if (before.kind !== 'text' || after.kind !== 'text') return { ok: false, reason: 'invalid', turn: turn };
+  if (Buffer.byteLength(before.text) > MAX_DIFF_SIDE_BYTES || Buffer.byteLength(after.text) > MAX_DIFF_SIDE_BYTES) {
+    return { ok: false, reason: 'oversized', turn: turn };
+  }
+  return {
+    ok: true,
+    turn: turn,
+    display: typeof body.display === 'string' ? body.display.slice(0, 512) : '',
+    before: before.text,
+    after: after.text
+  };
+}
+
+/** 注册 dsh-diff 虚拟文档 provider（幂等；老 VS Code 缺 API 时静默跳过）。 */
+function ensureDiffProvider() {
+  if (diffProviderRegistered) return;
+  if (!vscode.workspace || typeof vscode.workspace.registerTextDocumentContentProvider !== 'function') return;
+  diffProviderRegistered = true;
+  const emitter = typeof vscode.EventEmitter === 'function' ? new vscode.EventEmitter() : null;
+  const provider = {
+    provideTextDocumentContent: (uri) => {
+      const hit = diffDocs.get(String(uri));
+      return hit ? hit.text : '';
+    }
+  };
+  if (emitter) provider.onDidChange = emitter.event;
+  try {
+    vscode.workspace.registerTextDocumentContentProvider(DIFF_SCHEME, provider);
+  } catch {
+    diffProviderRegistered = false;
+  }
+}
+
+/** 超过条目/字节上限时淘汰最旧内容（diff 只活到用户看完，不需要持久）。 */
+function evictDiffDocs() {
+  while (diffDocs.size > DIFF_DOC_MAX_ENTRIES || diffDocBytes > DIFF_DOC_MAX_BYTES) {
+    const first = diffDocs.keys().next();
+    if (first.done) break;
+    const entry = diffDocs.get(first.value);
+    diffDocBytes -= entry ? entry.bytes : 0;
+    diffDocs.delete(first.value);
+  }
+}
+
+/** 把一段文本存进虚拟文档，返回可交给 vscode.diff 的 Uri。 */
+function storeDiffDoc(label, text) {
+  ensureDiffProvider();
+  const value = typeof text === 'string' ? text : '';
+  diffDocSeq += 1;
+  const safe = String(label || 'file').replace(/[^\w.\-]/g, '_').slice(0, 80);
+  const key = DIFF_SCHEME + ':/' + diffDocSeq + '/' + safe;
+  const bytes = Buffer.byteLength(value);
+  diffDocs.set(key, { text: value, bytes: bytes });
+  diffDocBytes += bytes;
+  evictDiffDocs();
+  return vscode.Uri.parse(key);
+}
+
+/** 当前缓存的虚拟文档条目数（测试用）。 */
+function diffDocCount() {
+  return diffDocs.size;
+}
+
+/** 测试钩子：替换外部取数依赖（传 null 恢复真实实现）。 */
+function setDiffDeps(deps) {
+  diffDepsOverride = deps || null;
+}
+
+/** 当前生效的外部取数依赖。 */
+function diffDeps() {
+  return diffDepsOverride || {};
+}
+
+/**
+ * 向 dsh 取「某会话某轮里某文件的变更」。
+ * 失败返回原因码：unavailable（路由不存在/旧 dsh/插件未装/会话已释放）、
+ * no-change（该轮没改这个文件）、binary/oversized、timeout/error。
+ * @param {{sessionId: string, turn: number}} coord
+ * @param {string} fsPath
+ * @returns {Promise<{ok: true, turn: number, display: string, before: string, after: string} | {ok: false, reason: string}>}
+ */
+async function fetchTurnChange(coord, fsPath) {
+  let base;
+  try {
+    base = await apiBase();
+  } catch {
+    return { ok: false, reason: 'error' };
+  }
+  const query = '?sessionId=' + encodeURIComponent(coord.sessionId)
+    + '&turn=' + encodeURIComponent(String(coord.turn))
+    + '&path=' + encodeURIComponent(fsPath);
+  let body;
+  try {
+    body = await httpGetJson(base + CHANGES_ROUTE + query, TURN_CHANGE_TIMEOUT_MS);
+  } catch (e) {
+    if (e && e.status === 404) return { ok: false, reason: change404Reason(e.body) };
+    if (e && e.message === 'timeout') return { ok: false, reason: 'timeout' };
+    return { ok: false, reason: 'error' };
+  }
+  return parseTurnChangeResponse(body);
+}
+
+/**
+ * 解析轮级路由 404 的 error 码，映射成降级原因（文案各不相同，见 spec 005 第 8 节）。
+ * 没有可解析的 JSON（插件未安装/旧插件）时按「不可用」处理——那才是「重启 dsh web」的场景。
+ * @param {unknown} raw httpGetJson 附带的响应体
+ * @returns {'released'|'no-record'|'unavailable'}
+ */
+function change404Reason(raw) {
+  if (typeof raw !== 'string' || raw === '') return 'unavailable';
+  try {
+    const parsed = JSON.parse(raw);
+    if (parsed && parsed.error === 'released') return 'released';
+    if (parsed && parsed.error === 'no-record') return 'no-record';
+  } catch { /* 非 JSON（如插件缺失时的兜底页）→ 不可用 */ }
+  return 'unavailable';
+}
+
+/**
+ * 执行 git 并保留退出码与原始输出（POSIX/Windows 都不经 shell，参数按数组直达）。
+ * @param {string[]} args
+ * @returns {Promise<{code: number, stdout: string, stderr: string}>}
+ */
+function gitRunCode(args) {
+  return new Promise((resolve) => {
+    try {
+      execFile('git', args, {
+        timeout: GIT_TIMEOUT_MS,
+        windowsHide: true,
+        encoding: 'buffer',
+        maxBuffer: 4 * MAX_DIFF_SIDE_BYTES
+      }, (err, stdout) => {
+        const buf = Buffer.isBuffer(stdout) ? stdout : Buffer.from(String(stdout || ''), 'utf8');
+        const code = err && typeof err.code === 'number' ? err.code : (err ? 1 : 0);
+        resolve({ code: code, stdout: buf.toString('utf8'), stderr: err && err.stderr ? String(err.stderr) : '' });
+      });
+    } catch (e) {
+      resolve({ code: 1, stdout: '', stderr: String(e && e.message) });
+    }
+  });
+}
+
+/**
+ * 取「HEAD 版本」作为 diff 左侧基线（P0）。
+ * 只有「确实是 git 仓库且该文件有未提交改动」才有意义；其余一律 null（退回普通打开）。
+ * @param {any} uri 工作区内的文件 Uri
+ * @param {{run?: Function}} [deps] 测试可注入的 git 执行器
+ * @returns {Promise<{kind: 'text'|'absent', text: string} | null>}
+ */
+async function readGitHeadBaseline(uri, deps) {
+  const d = deps || {};
+  const run = typeof d.run === 'function' ? d.run : (args) => gitRunCode(args);
+  const file = uri && uri.fsPath ? String(uri.fsPath) : '';
+  if (file === '') return null;
+  const top = await run(['-C', path.dirname(file), 'rev-parse', '--show-toplevel']);
+  if (!top || top.code !== 0) return null;
+  const root = String(top.stdout || '').trim();
+  if (root === '') return null;
+  const rel = path.relative(root, file).replace(/\\/g, '/');
+  if (rel === '' || rel.startsWith('..') || path.isAbsolute(rel)) return null;
+  const diff = await run(['-C', root, 'diff', '--quiet', 'HEAD', '--', rel]);
+  if (!diff) return null;
+  // 0 = 无未提交改动；1 = 有改动；128 = 没有 HEAD（空仓库，整份算新增）。
+  if (diff.code === 0) return null;
+  if (diff.code !== 1 && diff.code !== 128) return null;
+  const blob = await run(['-C', root, 'show', 'HEAD:' + rel]);
+  if (!blob) return null;
+  if (blob.code !== 0) return { kind: 'absent', text: '' };
+  const text = typeof blob.stdout === 'string' ? blob.stdout : '';
+  if (hasNulByte(text) || Buffer.byteLength(text) > MAX_DIFF_SIDE_BYTES) return null;
+  return { kind: 'text', text: text };
+}
+
+/** 打开「两段内存文本」的并排 diff（轮级：左右都不依赖磁盘当前内容）。 */
+async function openVirtualDiff(before, after, label, title) {
+  const name = path.basename(String(label || 'file'));
+  const left = storeDiffDoc('before-' + name, before);
+  const right = storeDiffDoc('after-' + name, after);
+  await vscode.commands.executeCommand('vscode.diff', left, right, title, { preview: false, preserveFocus: false });
+}
+
+/** 把降级原因变成用户可见的一句话（失败必须写「怎么办」）。 */
+function notifyDiffFallback(reason) {
+  const messages = {
+    'no-change': 'DSH：本轮没有该文件的变更，已打开原文件',
+    'no-record': 'DSH：该轮还没有对比数据（可能尚未结束），已退回与 HEAD 对比',
+    released: 'DSH：该轮的对比数据已随会话释放，已退回与 HEAD 对比（可在 DSH 侧栏查看该轮）',
+    'no-text': 'DSH：该轮的改动取不到全文（多为 shell 直接改动），已退回与 HEAD 对比',
+    unavailable: 'DSH：轮级对比需要重启 dsh web 后生效，已退回与 HEAD 对比（命令面板：DeepSeek Harness: 重启 dsh web）',
+    binary: 'DSH：该文件是二进制，无法并排对比，已打开原文件',
+    oversized: 'DSH：文件超过 1 MiB，无法并排对比，已打开原文件',
+    timeout: 'DSH：轮级变更取数超时，已退回与 HEAD 对比',
+    error: 'DSH：轮级变更取数失败，已退回与 HEAD 对比'
+  };
+  const text = messages[reason] || messages.error;
+  const sticky = reason === 'unavailable' || reason === 'released';
+  vscode.window.setStatusBarMessage(text, sticky ? 8000 : 6000);
+}
+
+/**
+ * 尝试为本次点击打开 diff：P1（轮级）→ P0（HEAD ↔ 工作树）。
+ * @param {any} uri 已确认在工作区内且存在的文件 Uri
+ * @param {unknown} changeRaw 插件发来的轮坐标（可缺）
+ * @param {{fetchTurnChange?: Function, readGitHeadBaseline?: Function}} [deps]
+ * @returns {Promise<boolean>} 是否已打开 diff（false 时由调用方普通打开）
+ */
+async function openDiffFor(uri, changeRaw, deps) {
+  const d = deps || diffDeps();
+  const fetchChange = typeof d.fetchTurnChange === 'function' ? d.fetchTurnChange : fetchTurnChange;
+  const readHead = typeof d.readGitHeadBaseline === 'function' ? d.readGitHeadBaseline : readGitHeadBaseline;
+  const coord = sanitizeChangeCoord(changeRaw);
+  if (coord) {
+    let result;
+    try {
+      result = await fetchChange(coord, uri.fsPath);
+    } catch {
+      result = { ok: false, reason: 'error' };
+    }
+    if (result && result.ok === true) {
+      const label = result.display || uri.fsPath;
+      await openVirtualDiff(result.before, result.after, label, buildDiffTitle(label, 'turn', result.turn));
+      return true;
+    }
+    const reason = result && result.reason ? result.reason : 'error';
+    notifyDiffFallback(reason);
+    // 二进制/超大：再拿 HEAD 对比同样没意义（内容本身不可读），直接交回调用方普通打开。
+    if (reason === 'binary' || reason === 'oversized') return false;
+  }
+  let base = null;
+  try {
+    base = await readHead(uri, d);
+  } catch {
+    base = null;
+  }
+  if (!base) return false;
+  const text = base.kind === 'absent' ? '' : String(base.text || '');
+  const left = storeDiffDoc('head-' + path.basename(uri.fsPath), text);
+  await vscode.commands.executeCommand('vscode.diff', left, uri, buildDiffTitle(uri.fsPath, 'head'), { preview: false, preserveFocus: false });
+  return true;
+}
+
 /**
  * 处理「DSH 对话里点击工作区文件/文件夹链接」：在当前窗口的 VS Code 资源管理器中
  * 定位并打开，再把结果回执给 webview。
  *
  * 只有确认能打开（目标在当前工作区内且真实存在）才回执成功；否则回执失败，DSH 页面里
  * 的插件会回放原始点击，保持 DSH 自身行为（在 DSH 侧边栏打开）——不会出现点了没反应。
- * @param {{token?: unknown, path?: unknown}} msg
+ * @param {{token?: unknown, path?: unknown, change?: unknown}} msg
  * @param {any} webview 发起请求的 webview（侧边栏视图或编辑器标签页）
  */
 async function revealWorkspaceTarget(msg, webview) {
@@ -2416,9 +2881,17 @@ async function revealWorkspaceTarget(msg, webview) {
     return;
   }
   await vscode.commands.executeCommand('revealInExplorer', target.uri);
-  if (fileLinkAction() === 'revealAndOpen' && target.kind === 'file') {
-    // 用 vscode.open 交给 VS Code 自己挑编辑器（文本/图片/PDF 都能打开）。
-    await vscode.commands.executeCommand('vscode.open', target.uri, { preview: false, preserveFocus: false });
+  if (target.kind === 'file') {
+    if (isDiffMode(fileLinkAction())) {
+      // 定位 + 变更视图：拿不到 diff 才退回原文件（三级降级的最末一级）。
+      const opened = await openDiffFor(target.uri, msg.change);
+      if (!opened) {
+        await vscode.commands.executeCommand('vscode.open', target.uri, { preview: false, preserveFocus: false });
+      }
+    } else if (fileLinkAction() === 'revealAndOpen') {
+      // 用 vscode.open 交给 VS Code 自己挑编辑器（文本/图片/PDF 都能打开）。
+      await vscode.commands.executeCommand('vscode.open', target.uri, { preview: false, preserveFocus: false });
+    }
   }
   replyRevealResult(webview, token, true);
 }
@@ -2438,6 +2911,11 @@ function handleWebviewMessage(msg, webview) {
     }
   } else if (msg && msg.type === 'dsh-reveal-path') {
     const token = typeof msg.token === 'string' ? msg.token.slice(0, 64) : '';
+    if (isDiffMode(fileLinkAction()) && webview && typeof webview.postMessage === 'function') {
+      // 轮级取数可能超过插件默认的 2.5 s 等待：先回「已接单」，页面据此放宽到
+      // DIFF_TIMEOUT_MS，避免超时回放导致「diff 与 DSH 侧栏同时打开」。
+      try { webview.postMessage({ type: 'dsh-reveal-accepted', token: token }); } catch { /* 面板已销毁 */ }
+    }
     revealWorkspaceTarget(msg, webview).catch(() => replyRevealResult(webview, token, false));
   } else if (msg && msg.type === 'insert-selection-ack') {
     if (msg.status === 'forwarded') {
@@ -3451,7 +3929,7 @@ function dshEventText(event, alreadyEmitted) {
 }
 
 /**
- * 消费一批 DSH 会话事件：把助手正文回写给 Copilot，推进游标并报告回合是否结束。
+ * 消费一批 DSH 会话事件：把助手正文回写给 Copilot，推进游标并报告轮是否结束。
  * 抽成纯函数（只依赖 progress.report）便于单测；实时轮询与历史回放共用同一套语义。
  * @param {any[]} events
  * @param {{lastSeq?: number, started?: boolean, emitted?: boolean}} state
@@ -3483,7 +3961,7 @@ function applyDshEvents(events, state, progress) {
     const piece = dshEventText(e, st.emitted);
     if (piece === null) continue;
     st.started = true;
-    // 同一个回合里多条助手消息之间补空行，避免正文粘连。
+    // 同一个轮里多条助手消息之间补空行，避免正文粘连。
     const sep = piece.kind === 'message' && st.emitted ? '\n\n' : '';
     progress.report(makeTextPart(sep + piece.text));
     st.emitted = true;
@@ -3725,7 +4203,7 @@ async function handleDshModelRequest(model, messages, options, progress, token) 
     }
     // 去重：VS Code 会把同一次提问投递两次（「裸提问」+「instructions+<prompt>提问」），
     // 归一化后 currentPrompt 相同且附件签名一致；此时若该会话已有进行中/已完成的同题
-    // 回合（20 秒内），直接回放答案，避免 DSH 出现两个会话或同题重复提交。
+    // 轮（20 秒内），直接回放答案，避免 DSH 出现两个会话或同题重复提交。
     if (entry && entry.dshSessionId && entry.workspacePath === workspacePath
       && entry.lastUserText === currentPrompt
       && (entry.lastAttachSig || '') === currentAttachSig
@@ -4447,8 +4925,30 @@ module.exports.__internals = {
   ensureFileLinkPlugin,
   FILE_LINK_PLUGIN_NAME,
   fileLinkAction,
+  isDiffMode,
+  hasNulByte,
+  sanitizeChangeCoord,
+  normalizeChangeCandidates,
+  buildDiffTitle,
+  parseTurnChangeResponse,
+  change404Reason,
+  storeDiffDoc,
+  diffDocCount,
+  setDiffDeps,
+  openDiffFor,
+  readGitHeadBaseline,
+  fetchTurnChange,
+  httpGetJson,
+  DIFF_SCHEME,
+  DIFF_DOC_MAX_ENTRIES,
+  DIFF_TIMEOUT_MS,
+  MAX_DIFF_SIDE_BYTES,
+  TURN_CHANGE_TIMEOUT_MS,
+  CHANGES_PLUGIN_NAME,
+  FILE_LINK_ACTIONS,
   ensureLayoutPlugin,
   LAYOUT_PLUGIN_NAME,
+  ensureChangesPlugin,
   sidebarPolicy,
   sidebarUiState,
   shouldInstallLayoutPlugin,

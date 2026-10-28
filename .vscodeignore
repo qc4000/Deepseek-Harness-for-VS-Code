@@ -11,3 +11,10 @@ docs/**
 scripts/**
 .github/**
 **/AGENTS.md
+# 本机运行时/排查产物（会话回滚数据与隔离调试目录），不进扩展包
+.dsh/**
+.dsh-debug/**
+# 根目录零散草稿文件（如 tmp.py），不进扩展包
+tmp.py
+# 解包过的 vsix 目录（形如 deepseek-harness-vscode-<版本>/）：残留会整包被打进去
+deepseek-harness-vscode-*/

@@ -1,6 +1,6 @@
 name: CI
 
-# 每次 push / PR 都跑：语法检查 + 12 套离线单测（零依赖，无需 npm install）。
+# 每次 push / PR 都跑：语法检查 + 14 套离线单测（零依赖，无需 npm install）。
 on:
   push:
     branches: [main]

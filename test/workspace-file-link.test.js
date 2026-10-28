@@ -249,6 +249,29 @@ vscodeStub.workspace.workspaceFolders = [{ uri: fileUri(REPO) }];
   ok((await I.ensureFileLinkPlugin(profileDir)) === false, '重复安装幂等（版本一致时不再写盘/不再提示重启）');
   fs.rmSync(profileDir, { recursive: true, force: true });
 
+  // ── [8] diffAndOpen 模式与配套插件安装 ─────────────────────────
+  console.log('[8] diffAndOpen：动作枚举与配套插件安装');
+  configValues[ACTION_KEY] = 'diffAndOpen';
+  ok(I.fileLinkAction() === 'diffAndOpen', 'diffAndOpen 是合法动作值');
+  ok(I.isDiffMode(I.fileLinkAction()) === true, 'diffAndOpen 进入 diff 模式');
+  configValues[ACTION_KEY] = 'revealAndOpen';
+  ok(I.isDiffMode(I.fileLinkAction()) === false, 'revealAndOpen 不进入 diff 模式');
+
+  const profileDir2 = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-profile-changes-'));
+  ok((await I.ensureChangesPlugin(profileDir2)) === true, '首次安装 dsh-vscode-changes 返回「有变化」（提示重启 dsh web）');
+  const changesDir = path.join(profileDir2, 'node_modules', I.CHANGES_PLUGIN_NAME);
+  ok(fs.existsSync(path.join(changesDir, 'lib', 'index.js')) && fs.existsSync(path.join(changesDir, 'cordis.patch.yml')), '宿主半边与 bundle patch 已落盘');
+  ok(!fs.existsSync(path.join(changesDir, 'lib', 'client.js')), '没有客户端半边（只有宿主入口）');
+  const changesPkg = JSON.parse(fs.readFileSync(path.join(changesDir, 'package.json'), 'utf8'));
+  ok(changesPkg.name === I.CHANGES_PLUGIN_NAME && /^\d+\.\d+\.\d+$/.test(changesPkg.version), '落盘的 package.json 正确');
+  const profilePkg2 = JSON.parse(fs.readFileSync(path.join(profileDir2, 'package.json'), 'utf8'));
+  ok(profilePkg2.dsh.profile.bundles.includes(I.CHANGES_PLUGIN_NAME), '已登记到 profile 的 dsh.profile.bundles（DSH 才会加载）');
+  ok(!profilePkg2.dependencies || !profilePkg2.dependencies[I.CHANGES_PLUGIN_NAME], '不写入 dependencies（npm 上没有该包，避免 pnpm 解析失败）');
+  ok((await I.ensureChangesPlugin(profileDir2)) === false, '重复安装幂等');
+  const changesCheck = spawnSync(process.execPath, ['--check', path.join(changesDir, 'lib', 'index.js')], { encoding: 'utf8' });
+  ok(changesCheck.status === 0, '落盘的插件语法真实通过' + (changesCheck.status !== 0 ? '：' + (changesCheck.stderr || '').slice(0, 200) : ''));
+  fs.rmSync(profileDir2, { recursive: true, force: true });
+
   fs.rmSync(tmp, { recursive: true, force: true });
   fs.rmSync(outsideProbe, { force: true });
   console.log('\n全部通过：' + passed + ' 项断言 ✓');

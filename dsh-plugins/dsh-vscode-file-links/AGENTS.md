@@ -32,9 +32,15 @@ DSH 把对话里的工作区路径渲染成 `<button class="_fileLink_xxx">`，�
    因为它在 DSH 页面上下文执行，运行环境由 DSH 前端决定。
 4. **无依赖**：不 import 任何包，只用 `window` / `document` / `navigator`。
 5. **协议字段固定**：`source` 用 `dsh-vscode-file-links` / `dsh-vscode-host`；`type` 用
-   `hello` / `ack` / `reveal` / `reveal-result`；`mode` 用 `revealAndOpen` / `revealOnly`。
+   `hello` / `ack` / `reveal` / `reveal-ack` / `reveal-result`；`mode` 用 `revealAndOpen` /
+   `diffAndOpen` / `revealOnly`；`change`（仅 diff 模式）用 `{ sessionId, turn }`。
    改协议必须同时改 `extension.js`（`buildIframeHtml` 中继脚本 + `handleWebviewMessage`）与宿主测试。
-6. **超时即回退**：`REVEAL_TIMEOUT_MS`（2500ms）内没有回执就回放原始点击。
+   ⚠️ **`ack` 有两种**：文件链接的（带 `fileLinks`/`mode`/`diff`）与侧栏布局测量的
+   （只有 `layout: true`）。宿主在 iframe 加载时先发前者、紧接着发后者；客户端**必须**
+   按字段区分（只带 `layout` 的那条直接 return），否则布局 ack 会把 `diffMode` 覆盖成
+   `false`，之后所有点击都不带轮坐标——2026-10-28 真机事故，轮级 diff 端到端从未生效。
+6. **超时即回退**：`REVEAL_TIMEOUT_MS`（2500ms）内没有回执就回放原始点击；
+   收到 `reveal-ack`（宿主已接单）后放宽到 `DIFF_WAIT_MS`（6000ms，与扩展 `DIFF_TIMEOUT_MS` 一致）。
 
 ## 修改流程
 

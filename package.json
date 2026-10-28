@@ -2,7 +2,7 @@
   "name": "deepseek-harness-vscode",
   "displayName": "DeepSeek Harness for VSCode",
   "description": "DeepSeek Harness (DSH) 的 VS Code 接入：侧边栏/标签页忠实呈现 DSH Web GUI 并自动检测启动，不影响用户对 DSH 本身的页面组织、第三方插件装配等二次开发行为；v0.7.13 起把 DSH 注册为 Copilot 聊天模型——模型选择器里出现 DeepSeek Harness 下属模型条目，接收 Copilot 组织好的现成对话、滤除对话内容无关的 prompt、交给 DSH 二次组织、流式回写，旨在利用 DSH 强大的任务编排与工具调用能力，发挥最大性能",
-  "version": "1.0.3",
+  "version": "1.0.4",
   "publisher": "vithrive",
   "license": "MIT",
   "icon": "media/icon.png",
@@ -83,11 +83,13 @@
           "default": "revealAndOpen",
           "enum": [
             "revealAndOpen",
+            "diffAndOpen",
             "revealOnly",
             "off"
           ],
           "enumDescriptions": [
-            "点击 DSH 对话里的工作区文件/文件夹链接时，在 VS Code 资源管理器中定位并打开（文件打开编辑器，文件夹仅定位）",
+            "点击 DSH 对话里的工作区文件/文件夹链接时，在 VS Code 资源管理器中 定位并打开（文件打开编辑器，文件夹仅定位）",
+            "定位 + 展示变更：优先打开「该轮的变更」并排对比（左右为该轮开始/结束时的原文，标题如 a.ts · 第 7 轮），拿不到时退回「与 HEAD 的差异」，再不行打开原文件；会安装配套 插件 dsh-vscode-changes",
             "只在本窗口的 VS Code 资源管理器中定位并选中，不额外打开编辑器",
             "不接管：保持 DSH 自身行为（在 DSH 侧边栏打开）。此时也不会安装配套插件 dsh-vscode-file-links"
           ],

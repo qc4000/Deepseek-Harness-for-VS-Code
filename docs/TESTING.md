@@ -7,7 +7,7 @@
 ## 1. 命令
 
 ```bash
-npm test                      # 语法检查 + 12 套离线单测（343 项断言）
+npm test                      # 语法检查 + 14 套离线单测（504 项断言）
 npm run test:one -- file-link # 只跑文件名含 file-link 的套件（TDD 内循环）
 npm run test:verbose          # 逐套件完整输出（看每个 ✓/✗）
 npm run test:all              # 追加真实 dsh e2e（需本机已安装 dsh）
@@ -57,14 +57,16 @@ CI 只认退出码，不看输出格式。
 | `clipboard-plugin.test.js` | 18 | 生成文件的语法真实通过；只拦 ⌘C/⌘V/⌘X（不拦 ⌘A/撤销/光标）；macOS + Electron + iframe 三重门控；不写 `dependencies`；`cordis.patch.yml` 结构 |
 | `command-execution.test.js` | 5 | `runCommandOk`/`runCommandOutput` 真实命令成功与失败；元字符注入拒绝；POSIX 无 shell / Windows 引号路径两条执行路径 |
 | `config-sanitize.test.js` | 14 | `getHost` 白名单与回退；`getPort` 整数/范围；`sanitizeCommand` 拒绝 `& \| < > ^ % ! " \` ;` 与换行；合法带空格路径保留 |
+| `dsh-changes-plugin.test.js` | 45 | `dsh-vscode-changes` 宿主插件（按真机契约重写）：包声明/语法/不写 dependencies；路由参数校验（缺参/越界/超长）；公开钩子自捕获两侧全文（`fs/write-intent` **与** `fs/edit-intent` + `turn/end`）：同轮多次编辑合并为一条净变更、write+edit 混用仍一条、跨轮互不累积、改回原样不列出、新增/删除文件两侧 absent；`summary()` 权威清单匹配（未记录路径不读盘）；shell 直接改动 `no-text`；会话释放 `released` / 轮无记录 `no-record` / 服务形状不符 `unavailable` 三种 404；二进制与超大；同轮取最新事件 |
 | `dsh-model-mapping.test.js` | 38 | 条目 id/名称（改 id 会丢用户已选）；非 `dsh` 条目映射到 DSH 在册模型；provider info 字段合法（成本串/上限/capabilities/推理档位 schema）；`findMissingDshModels` 漂移检测；诊断文件落临时 HOME |
-| `dsh-sidebar.test.js` | 61 | 侧栏裁剪中继脚本（`vm` 真跑）：stage/clip 分层与缩放解耦、auto/show/hide × 宽度、280/420/56/0 与 `+4` 手柄余量、异常测量丢弃、按钮切换与上报、宿主 `toggle`/`config` 消息、未测量时不裁并上报 unavailable；测量插件文件/声明/语法/安装幂等/`show` 不安装；插件客户端仿真（握手前静默、上报、拖动重报、折叠标记、卸载清理、元素缺失不误报） |
+| `dsh-sidebar.test.js` | 61（有 1 条 zoom 断言待随 1.0.3 回退更新，既有问题、与 005 无关） | 侧栏裁剪中继脚本（`vm` 真跑）：stage/clip 分层与缩放解耦、auto/show/hide × 宽度、280/420/56/0 与 `+4` 手柄余量、异常测量丢弃、按钮切换与上报、宿主 `toggle`/`config` 消息、未测量时不裁并上报 unavailable；测量插件文件/声明/语法/安装幂等/`show` 不安装；插件客户端仿真（握手前静默、上报、拖动重报、折叠标记、卸载清理、元素缺失不误报） |
 | `dsh-stream-events.test.js` | 22 | `assistant/message` 只回写 text 块；旧 `text-delta` 增量；历史 `block-end` 不重复；`seq` 游标推进；`turn/end` 结束与异常原因；空事件列表安全 |
-| `file-link-bridge.test.js` | 25 | `vm` 真跑 webview 中继脚本：握手 ack（含重试）、reveal 转发、result 回传、origin/source 校验、`off` 模式不转发；`dsh-open-link` / `insert-selection` 既有中继不受影响 |
-| `file-link-client-sim.test.js` | 27 | 插件客户端仿真：未 ack 前不介入；命中按钮 → 阻断 + 发 reveal；`ok=true` 不回放 / `ok=false` 回放 / 超时回放；修饰键不接管；非链接按钮不接管；独立浏览器不打招呼；卸载后清定时器 |
+| `file-link-bridge.test.js` | 37 | `vm` 真跑 webview 中继脚本：握手 ack（含重试）、reveal 转发、result 回传、origin/source 校验、`off` 模式不转发；`dsh-open-link` / `insert-selection` 既有中继不受影响；diff 模式 `ack.diff`、轮坐标透传与非法坐标丢弃、`reveal-ack` 回传 |
+| `file-link-client-sim.test.js` | 46 | 插件客户端仿真：未 ack 前不介入；命中按钮 → 阻断 + 发 reveal；`ok=true` 不回放 / `ok=false` 回放 / 超时回放；修饰键不接管；非链接按钮不接管；独立浏览器不打招呼；卸载后清定时器；diff 模式带轮坐标、`reveal-ack` 把等待从 2.5 s 放宽到 6 s；坐标两条退路（无 `ctx.get` 只有属性访问、祖先无标记取「前一个」标记行）；**布局 ack（`{layout:true}`）不得覆盖 `diffMode`**（真机根因回归）；取不到坐标不带（AC-7） |
+| `file-link-diff.test.js` | 74 | 轮级 diff 宿主侧：坐标净化、匹配候选、标题（轮级 vs HEAD）、二进制/体积判定；404 三种含义（`released`/`no-record`/`unavailable`）与 `no-text` 的原因映射及各自文案；`dsh-diff` 虚拟文档存取与容量淘汰；三级降级（P1 → P0 → L0）与提示文案；git 基线（无改动/非仓库/空仓库/二进制/超大）；`handleWebviewMessage` 接单回执与非法坐标丢弃 |
 | `macos-keysim.test.js` | 24 | macOS UA 下逐键行为与 IME/修饰键过滤；Windows 与非 iframe 场景完全不激活 |
 | `remote-mode.test.js` | 15 | `isLocalLoopbackTarget`：WSL Remote 放行、SSH/Dev Container 禁用、非回环禁用；无服务时 `probeDirectIndexStatus` 安全返回 0 |
-| `workspace-file-link.test.js` | 73 | 插件文件齐全/声明/语法；中继脚本语法 + 协议字段；路径解析（相对多工作区、绝对、`../` 越界、不存在、`:12`/`#L12` 行号）；`revealAndOpen`/`revealOnly`/`off`；安装幂等且不写 `dependencies` |
+| `workspace-file-link.test.js` | 84 | 插件文件齐全/声明/语法；中继脚本语法 + 协议字段；路径解析（相对多工作区、绝对、`../` 越界、不存在、`:12`/`#L12` 行号）；`revealAndOpen`/`revealOnly`/`off`；安装幂等且不写 `dependencies`；`diffAndOpen` 枚举与 `dsh-vscode-changes` 安装（只宿主半边、登 记 bundles、幂等、落盘语法通过） |
 | `e2e-real-dsh.test.js` | — | 真实 dsh：启动参数与扩展一致；捕获 `dsh web:` 令牌；裸地址 401；经代理 200；真实 RPC 信封调用；结束清理 |
 
 ## 5. 写新测试的骨架

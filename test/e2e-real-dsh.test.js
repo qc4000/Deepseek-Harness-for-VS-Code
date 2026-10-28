@@ -271,11 +271,17 @@ async function main() {
     }
     if (!killed) {
       // 按端口清理 [5] 阶段扩展函数拉起的实例（跨平台：Windows netstat+taskkill；
-      // POSIX 用 fuser/lsof，不依赖 netstat（Linux 常无该命令））。
+      // POSIX 只杀「监听」该端口的进程）。
+      // 不能用 `fuser -k <port>/tcp`：它会把以该端口为远端的客户端（本测试进程自己）
+      // 一起 SIGKILL，表现为断言全过却以 137 退出。
       const execSync = require('child_process').execSync;
       if (process.platform !== 'win32') {
-        try { execSync('fuser -k ' + PORT + '/tcp 2>/dev/null || true'); } catch { /* noop */ }
-        try { execSync('lsof -ti:' + PORT + ' 2>/dev/null | xargs -r kill -9 2>/dev/null || true'); } catch { /* noop */ }
+        try { execSync('lsof -ti:' + PORT + ' -sTCP:LISTEN 2>/dev/null | xargs -r kill -9 2>/dev/null || true'); } catch { /* 无 lsof 时忽略 */ }
+        try {
+          const line = execSync('ss -ltnp 2>/dev/null | grep -F "127.0.0.1:' + PORT + '" || true', { encoding: 'utf8' });
+          const m = /pid=(\d+)/.exec(line);
+          if (m) process.kill(Number(m[1]), 'SIGKILL');
+        } catch { /* 无 ss / 已退出 时忽略 */ }
       } else {
         const net = execSync('netstat -ano -p tcp', { encoding: 'utf8' });
         const pids = new Set();

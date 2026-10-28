@@ -1,0 +1,5 @@
+# dsh-vscode-changes bundle patch: one insert registering the host-only plugin.
+# The row name must match the npm package name and the host half's exported `name`.
+- insert:
+    - id: vscode-changes
+      name: 'dsh-vscode-changes'

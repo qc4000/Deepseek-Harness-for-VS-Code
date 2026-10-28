@@ -197,17 +197,27 @@ profile 目录：`$DSH_HOME`（默认 `~/.dsh`）`/profiles/web`；插件写入
 | `dsh-webview-clipboard` | `clipboardPluginFiles()` 以源码字符串生成 | 0.2.1 | macOS 内嵌 iframe 下 ⌘C/⌘V/⌘X 失效修复（execCommand） |
 | `dsh-vscode-layout` | `bundledPluginFiles()` 读 `dsh-plugins/` 真实文件 | 0.1.1 | 只读上报 DSH 左侧栏宽度/折叠状态（供面板视口裁剪）；`dshPanel.dshSidebar=show` 时不安装 |
 | `dsh-vscode-file-links` | `dsh-plugins/` 真实文件随扩展分发 | 见插件 `package.json` | 工作区文件/文件夹链接改在 VS Code 资源管理器定位/打开 |
+| `dsh-vscode-changes` | `dsh-plugins/` 真实文件随扩展分发（**仅宿主半边**） | 见插件 `package.json` | 把「某会话某轮里某文件的两侧全文」出口成一条鉴权 GET 路由（`/api/dsh-vscode.changes-file`），供轮级 diff；仅 `workspaceFileLinkAction=diffAndOpen` 时安装 |
+
+两个与 diff 相关的插件用到的 DSH 字段（均为实测，非公开契约，结构不符即 404）：
+
+- `ctx.workspaceChanges.records.get(seq)` → `{ summary:{turn,cwd,files[]}, sources[] }`（与 `files` 一一对应）
+- 一侧来源要么是捕获副本 `{kind:'file',file}`，要么是 git 快照 `{kind:'snapshot',repository:{workspace:{root,env}},tree,path}`
+  （`workspace.env` 带 `GIT_OBJECT_DIRECTORY`，用 `git cat-file blob <tree>:<path>` 取全文）
 
 任一插件新增/升级后：若 dsh 在运行，提示「请点击重启 dsh web 使其生效」。
 
 **文件链接消息协议**（三方必须一致）：
 
 ```
-插件 → webview：{ source:'dsh-vscode-file-links', type:'hello' | 'reveal', token, path }
-webview → 插件：{ source:'dsh-vscode-host', type:'ack', fileLinks:true, mode } | { type:'reveal-result', token, ok }
-webview → 宿主：{ type:'dsh-reveal-path', token, path }
-宿主 → webview：{ type:'dsh-reveal-result', token, ok }
+插件 → webview：{ source:'dsh-vscode-file-links', type:'hello' | 'reveal', token, path, change? }
+webview → 插件：{ source:'dsh-vscode-host', type:'ack', fileLinks:true, mode, diff } | { type:'reveal-ack', token } | { type:'reveal-result', token, ok }
+webview → 宿主：{ type:'dsh-reveal-path', token, path, change? }
+宿主 → webview：{ type:'dsh-reveal-accepted', token } | { type:'dsh-reveal-result', token, ok }
 ```
+
+- `change = {sessionId, turn}` 只在 `mode=diffAndOpen`（`ack.diff=true`）时携带；webview 侧逐字段校验，不合规整条丢弃。
+- `reveal-ack` 是「宿主已接单」：页面据此把等待从 2.5s 放宽到 6s，避开「diff 与 DSH 侧栏同时打开」。
 
 - webview 侧校验 `event.origin === FRAME_ORIGIN` 且 `event.source` 为自身 iframe（允许 `null`）。
 - 宿主侧 `resolveWorkspaceTarget()`：规范化 → 去行号（`:12` / `#L12`）→ 相对路径对每个工作区文件夹

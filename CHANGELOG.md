@@ -2,6 +2,21 @@
 
 本项目遵循 [语义化版本](https://semver.org/lang/zh-CN/)。完整提交历史见 [GitHub](https://github.com/Vithrive/Deepseek-Harness-for-VS-Code/commits/main)。
 
+## 1.0.4
+
+**忠实窗口（面板）**
+
+- **新增 `dshPanel.workspaceFileLinkAction = diffAndOpen`：点击对话里的文件链接直接看变更**，不再只是打开原文件。数据按三级降级：① 轮级——点击那条消息所属轮次的开始/结束原文（标题如 `a.ts · 第 7 轮`）；② 工作树 vs `HEAD`（标题写明 `与 HEAD 的差异`）；③ 普通打开（1.0.x 行为）。默认值仍为 `revealAndOpen`，需主动切换。
+- **轮级数据来源**：新增内置插件 `dsh-vscode-changes`（仅宿主半边，随扩展分发、不经 npm），从 DSH 进程内的会话记录取出两侧全文，经一条鉴权路由交给扩展；只按「会话 + 轮 + 已记录的文件清单」匹配，不接受任意路径读盘；单侧 1 MiB 上限。
+- **历史轮也能看**：会话存活期间，任意历史轮的 diff 都能在 VS Code 里并排展示；重启 dsh web / 会话释放后自动退回 `与 HEAD 的差异` 并提示。
+- **不双开**：取数慢于 2.5 s 时宿主先回「已接单」（`reveal-ack`），客户端把等待放宽到 6 s 再回放点击，避免 diff 与 DSH 侧栏同时打开。
+- **降级都可见**：二进制、单侧 > 1 MiB、本轮没改过、插件未安装（需重启 dsh web）、非 Git 仓库，各自有中文状态栏提示与下一步动作。
+
+**测试**
+
+- 新增 `test/dsh-changes-plugin.test.js`（45 项）与 `test/file-link-diff.test.js`（74 项）；扩充 `file-link-bridge`（37）、`file-link-client-sim`（46）、`workspace-file-link`（84）。全量 14 套 / 504 项断言。
+- 规格：[005-file-link-turn-diff](docs/sdd/specs/005-file-link-turn-diff/spec.md)。
+
 ## 1.0.3
 
 **修复（回退）**

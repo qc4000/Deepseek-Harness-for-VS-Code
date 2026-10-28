@@ -206,6 +206,47 @@ function makeWebviewRealm(mode) {
     ok(wv.toHost.some((m) => m.type === 'insert-selection-ack' && m.status === 'forwarded'), '发送选中内容回执仍然正常');
   }
 
+  console.log('[7] diff 模式：轮次坐标透传 + reveal-ack 回传');
+  {
+    const wv = makeWebviewRealm('diffAndOpen');
+    wv.fireLoad();
+    const acks = wv.frameMessages.filter((m) => m.payload.type === 'ack');
+    ok(acks.length >= 1 && acks[0].payload.diff === true, 'diffAndOpen 的 ack 带 diff:true（插件据此才发坐标）');
+
+    wv.fromPlugin({ source: 'dsh-vscode-file-links', type: 'reveal', token: 'tk-d1', path: 'package.json', change: { sessionId: 'session-ab12', turn: 7 } });
+    ok(wv.toHost.length === 1 && wv.toHost[0].change && wv.toHost[0].change.sessionId === 'session-ab12' && wv.toHost[0].change.turn === 7, '合法轮次坐标透传给宿主');
+
+    // 非法坐标整条丢弃（宿主退回 HEAD 对比）
+    const cases = [
+      { sessionId: 's', turn: 0 },
+      { sessionId: 's', turn: 1.5 },
+      { sessionId: 's'.repeat(129), turn: 3 },
+      { sessionId: '', turn: 3 },
+      { sessionId: 's', turn: 1000001 },
+      { sessionId: 1, turn: 3 }
+    ];
+    for (const bad of cases) {
+      const before = wv.toHost.length;
+      wv.fromPlugin({ source: 'dsh-vscode-file-links', type: 'reveal', token: 'tk-bad', path: 'package.json', change: bad });
+      ok(wv.toHost.length === before + 1 && wv.toHost[wv.toHost.length - 1].change === undefined, '非法坐标被丢弃：' + JSON.stringify(bad));
+    }
+
+    // 宿主接单 → 回 reveal-ack 给页面
+    const beforeAck = wv.frameMessages.length;
+    wv.fromHost({ type: 'dsh-reveal-accepted', token: 'tk-d1' });
+    const ackMsgs = wv.frameMessages.slice(beforeAck).filter((m) => m.payload.type === 'reveal-ack');
+    ok(ackMsgs.length === 1 && ackMsgs[0].payload.token === 'tk-d1', '宿主接单后向页面回 reveal-ack');
+    ok(ackMsgs[0].origin === DSH_ORIGIN, 'reveal-ack 使用精确 targetOrigin');
+
+    // revealAndOpen 模式不带 diff 标记（老行为不变）
+    const plain = makeWebviewRealm('revealAndOpen');
+    plain.fireLoad();
+    const plainAcks = plain.frameMessages.filter((m) => m.payload.type === 'ack');
+    ok(plainAcks.every((m) => m.payload.diff === false), 'revealAndOpen 的 ack 不带 diff');
+    plain.fromPlugin({ source: 'dsh-vscode-file-links', type: 'reveal', token: 'tk-p1', path: 'package.json', change: { sessionId: 's', turn: 3 } });
+    ok(plain.toHost[0].change === undefined, '非 diff 模式下即使插件带坐标也不透传');
+  }
+
   console.log('\n全部通过：' + passed + ' 项断言 ✓');
   process.exit(0);
 })().catch((e) => {
