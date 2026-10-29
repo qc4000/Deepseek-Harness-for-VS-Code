@@ -9,11 +9,15 @@
 - **修复面板内 DSH「复制」按钮无法复制**：代码块、消息操作条、JSON 复制都走 `navigator.clipboard.writeText`，而 VS Code 的权限策略会拒绝 webview 内层跨源 iframe（[microsoft/vscode#182642](https://github.com/microsoft/vscode/issues/182642)）；DSH 捕获失败后直接返回、不再回退，表现为「点了复制没反应」。内置插件 `dsh-webview-clipboard` 升级到 0.3.0（全平台生效）：包装 `writeText`，按「原生 → 宿主 `vscode.env.clipboard` → `execCommand`」三级回退，只在面板内嵌时接管，系统浏览器直开 DSH 行为不变。
 - 复制失败不再静默：宿主写剪贴板抛错或文本超过 1 MiB 时，状态栏提示一次并给出「选中文本后按 Ctrl+C（⌘C）」的出路。
 - 旧的 macOS ⌘C/⌘V/⌘X 快捷键修复保留，两套能力共存。
+- **同步上游能力：官网 Windows 桌面版启动**：自动从注册表/常见默认目录定位桌面版内置 CLI，按 `dshPanel.dshCommand` → 桌面版 CLI → `npx` 的顺序启动，不需要 PATH / npm / Node；桌面版起的实例仍是 web profile，会话与凭据共享。
+- **同步上游能力：Remote-SSH / Dev Containers 受管认证代理**：真远程下按「`dshPanel.url` 是否回环」判定代理可用，面板经 `asExternalUri` 转发加载；远程模式只放行已转发 authority 的请求，扩展自身请求带一次性密钥头。新增 `dshPanel.remoteAuthProxy`（默认 `true`），多用户共享服务器建议关闭。
+- **同步上游能力：远端面板用本机浏览器登录 DeepSeek 账号**：新增内置插件 `dsh-vscode-open-external`，接管 DSH 页面的 `window.open`，把授权链接交给 `vscode.env.openExternal` 在客户端（WSL/Remote 下即本机）浏览器打开；只转交 http(s) 链接，仅握手后接管，新增 `dshPanel.installOpenExternalPlugin`（默认 `true`）。
 
 **测试**
 
+- 同步上游测试：新增 `desktop-app-support`、`remote-auth-proxy`、`open-external-plugin` 三套，重写 `remote-mode` 断言。
 - 新增 `test/clipboard-bridge.test.js`（16 项）：中继转发与 origin/source 双校验、超长拒绝与回执、宿主写入成功/失败、失败提示只一次。
-- `test/clipboard-plugin.test.js` 扩到 42 项：新增客户端仿真（原生成功不发消息、原生被拒走宿主、无回执/`ok:false` 走 `execCommand`、非 iframe 不接管、未知 token 忽略）。全量 16 套 / 617 项断言。
+- `test/clipboard-plugin.test.js` 扩到 42 项：新增客户端仿真（原生成功不发消息、原生被拒走宿主、无回执/`ok:false` 走 `execCommand`、非 iframe 不接管、未知 token 忽略）。合并上游后全量 19 套 / 746 项断言。
 - 规格：[007-webview-clipboard-copy](docs/sdd/specs/007-webview-clipboard-copy/spec.md)。
 
 ## 1.0.5

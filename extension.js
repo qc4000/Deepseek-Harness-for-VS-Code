@@ -16,8 +16,8 @@ let activeView = null;
 let managedChild = null;
 // 防止多个视图实例同时触发启动。
 let ensurePromise = null;
-// 解析出的 dsh 启动方式：{ cmd, prefix }。null 表示尚未解析或都不可用。
-// 优先全局安装（dsh 命令），其次 npx 缓存安装（npx 安装不会写入全局 PATH）。
+// 解析出的 dsh 启动方式：{ cmd, prefix, kind }。null 表示尚未解析或都不可用。
+// 优先级：PATH 上的 dsh（npm 全局安装）→ 官网 Windows 桌面版内置 CLI → npx 缓存安装。
 let dshInvocation = null;
 let dshInvocationAt = 0;
 // 编辑器标签页模式：当前打开的 DSH 标签页 panel（未打开时为 null）。
@@ -28,7 +28,7 @@ let gContext = null;
 let dshModelProviderRegistered = false;
 // dsh 0.1.2-rc 起新增 web 浏览器认证：进程启动令牌（每次重启变化，从 stdout 学习）。
 let dshLaunchToken = null;
-// 本地受管认证代理（null = 未创建或不可用：Remote 场景 / 目标非回环地址）。
+// 受管认证代理（null = 未创建或不可用：目标非回环地址、或远程场景被配置关闭）。
 let authProxy = null;
 // ensureAuthProxy 的并发去重：多个视图/API 同时触发时只创建一次。
 let authProxyPromise = null;
@@ -84,9 +84,24 @@ function sanitizeCommand(cmd) {
 }
 
 function getDshCommand() {
-  // 配置了非法命令（含元字符）时回退 'dsh'，后续探测失败会自然落到 npx 兜底。
+  // 配置了非法命令（含元字符）时回退 'dsh'，后续探测失败会自然落到桌面版/npx 兜底。
   return sanitizeCommand(cfg().get('dshPanel.dshCommand', 'dsh')) || 'dsh';
 }
+
+// ── 官网 Windows 桌面版（Electron 应用）支持 ──
+// 桌面版把完整 dsh runtime 内嵌在 app.asar 里，并附带可直接调用的 CLI：
+//   <安装目录>\resources\runtime\cli\bin\dsh.cmd
+// 它用应用自带的 Electron 以 Node 模式跑 dsh CLI（`dsh web` 仍是 web profile），
+// 所以不需要 PATH 上的 dsh，也不需要 npm / Node。桌面版自己的后端固定在
+// 127.0.0.1:19387 + desktop profile，且带浏览器认证（令牌只经 Electron IPC 下发），
+// 外部无法复用；因此这里走「用桌面版自带 CLI 起一个 web profile 实例」。
+const DESKTOP_UNINSTALL_KEY = 'Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall';
+const DESKTOP_CLI_REL = path.win32.join('resources', 'runtime', 'cli', 'bin', 'dsh.cmd');
+// 桌面版 CLI 探测结果缓存：值为 {cmd, installDir} 或 null；正负结果都缓存 5 分钟，
+// 避免面板每次刷新都去查注册表（用户装完桌面版后最多 5 分钟生效，重载窗口可立即重查）。
+let desktopDshCache;
+let desktopDshCacheAt = 0;
+const DESKTOP_DSH_CACHE_MS = 5 * 60 * 1000;
 
 /**
  * 执行一条命令并判断是否成功（exit code === 0）。
@@ -96,6 +111,18 @@ function getDshCommand() {
  * @param {number} timeoutMs
  * @returns {Promise<boolean>}
  */
+/**
+ * Windows 下经 cmd.exe 启动时的命令文本：含空格的单文件命令需整体加引号。
+ * 官网桌面版的 CLI 路径形如
+ *   C:\Users\<user>\AppData\Local\Programs\DeepSeek Harness\resources\runtime\cli\bin\dsh.cmd
+ * 含空格，不加引号会被 cmd.exe 按空格切碎。
+ * @param {string} cmd
+ * @returns {string}
+ */
+function shellCommandText(cmd) {
+  return (process.platform === 'win32' && /\s/.test(cmd) && fs.existsSync(cmd)) ? '"' + cmd + '"' : cmd;
+}
+
 function runCommandOk(cmd, args, timeoutMs = 15000) {
   return new Promise((resolve) => {
     // 纵深校验（PR #12 思路）：cmd 来自 getDshCommand()（已净化），此处再拒一次。
@@ -107,7 +134,7 @@ function runCommandOk(cmd, args, timeoutMs = 15000) {
     // POSIX 上 shell:false 参数按数组直达进程（无解释器、无注入面）；
     // Windows 上 shell:true 为命中 dsh.cmd shim 所必需（Node ≥18.20 无 shell 执行
     // .cmd 会抛 EINVAL，CVE-2024-27980 防护），注入面由上方的净化+白名单收敛。
-    const cmdText = (process.platform === 'win32' && /\s/.test(cmd) && fs.existsSync(cmd)) ? '"' + cmd + '"' : cmd;
+    const cmdText = shellCommandText(cmd);
     const child = spawn(cmdText, args, {
       shell: process.platform === 'win32',
       stdio: 'ignore',
@@ -146,7 +173,7 @@ function runCommandOutput(cmd, args, timeoutMs = 12000) {
     if (process.platform === 'win32') {
       // Windows：dsh 为 .cmd shim，必须经 cmd.exe（无 shell 会 EINVAL/ENOENT，
       // 见 CVE-2024-27980 防护）；cmd/参数均已净化，含空格文件路径加引号。
-      const quoted = (/\s/.test(cmd) && fs.existsSync(cmd)) ? `"${cmd}"` : cmd;
+      const quoted = shellCommandText(cmd);
       exec(`${quoted} ${args.join(' ')}`, {
         timeout: timeoutMs,
         windowsHide: true,
@@ -171,21 +198,108 @@ function runCommandOutput(cmd, args, timeoutMs = 12000) {
 }
 
 /**
- * 解析可用的 dsh 启动方式，返回 { cmd, prefix } 或 null。
- * 1) 优先配置的 dsh 命令（默认 'dsh'，即 npm 全局安装、已写入 PATH）；
- * 2) 回退到 npx 缓存安装（npx 安装只缓存到 npx 目录，不写全局 PATH，
+ * 解析 `reg query … /f "DeepSeek Harness" /d` 输出里的 InstallLocation 行。
+ * 注册表写法形如 `    InstallLocation    REG_SZ    D:\Apps\DeepSeek Harness`。
+ * @param {string} stdout
+ * @returns {string[]}
+ */
+function parseRegInstallLocations(stdout) {
+  const dirs = [];
+  for (const line of String(stdout || '').split(/\r?\n/)) {
+    const m = /^\s*InstallLocation\s+REG_(?:SZ|EXPAND_SZ)\s+(.+?)\s*$/i.exec(line);
+    if (m) dirs.push(m[1]);
+  }
+  return dirs;
+}
+
+/**
+ * 从候选安装目录里挑出第一个带桌面版内置 CLI 的（纯函数，便于测试）。
+ * @param {string[]} dirs 候选安装目录
+ * @param {(p: string) => boolean} [exists] 存在性判断（测试注入）
+ * @returns {{cmd: string, installDir: string} | null}
+ */
+function pickDesktopCli(dirs, exists = fs.existsSync) {
+  const seen = new Set();
+  for (const dir of dirs || []) {
+    if (typeof dir !== 'string' || dir.trim() === '') continue;
+    const key = dir.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    const cli = path.win32.join(dir, DESKTOP_CLI_REL);
+    if (exists(cli)) return { cmd: cli, installDir: dir };
+  }
+  return null;
+}
+
+/**
+ * 探测官网 Windows 桌面版的内置 CLI。
+ * 安装位置来源：1) 注册表卸载项的 InstallLocation（覆盖自定义安装盘/目录，
+ * 桌面版按用户安装写 HKCU，同时兼容 HKLM 的机器级安装）；2) 常见默认目录兜底。
+ * @returns {Promise<{cmd: string, installDir: string} | null>}
+ */
+async function probeDesktopDshCli() {
+  if (process.platform !== 'win32') return null;
+  const dirs = [];
+  // 1) 注册表。/f … /d 按「数据」搜，卸载项 DisplayName 为 "DeepSeek Harness <版本>"。
+  const keys = [
+    'HKCU\\' + DESKTOP_UNINSTALL_KEY,
+    'HKLM\\' + DESKTOP_UNINSTALL_KEY,
+    'HKLM\\Software\\WOW6432Node\\Microsoft\\Windows\\CurrentVersion\\Uninstall'
+  ];
+  for (const key of keys) {
+    try {
+      const out = await runCommandOutput('reg', ['query', key, '/s', '/f', '"DeepSeek Harness"', '/d'], 8000);
+      dirs.push(...parseRegInstallLocations(out));
+    } catch (_) { /* 该 hive 无匹配项或无权限：继续 */ }
+  }
+  // 2) 默认安装目录兜底（注册表被清理、安装器路径变体等）。
+  const localAppData = process.env.LOCALAPPDATA || path.join(os.homedir(), 'AppData', 'Local');
+  dirs.push(path.join(localAppData, 'Programs', 'DeepSeek Harness'));
+  dirs.push(path.join(process.env.ProgramFiles || 'C:\\Program Files', 'DeepSeek Harness'));
+  dirs.push(path.join(process.env['ProgramFiles(x86)'] || 'C:\\Program Files (x86)', 'DeepSeek Harness'));
+  return pickDesktopCli(dirs);
+}
+
+/** 定位桌面版内置 CLI（带缓存，避免面板每次刷新都查注册表）。 */
+async function findDesktopDshCli() {
+  if (desktopDshCache !== undefined && (Date.now() - desktopDshCacheAt) < DESKTOP_DSH_CACHE_MS) {
+    return desktopDshCache;
+  }
+  const found = await probeDesktopDshCli();
+  desktopDshCache = found;
+  desktopDshCacheAt = Date.now();
+  return found;
+}
+
+/**
+ * 解析可用的 dsh 启动方式，按优先级返回 { cmd, prefix, kind } 或 null。
+ * 1) 配置的 dsh 命令（默认 'dsh'，即 npm 全局安装、已写入 PATH）；
+ * 2) 官网 Windows 桌面版内置 CLI（无需 PATH / npm / Node，桌面版自带 Electron runtime）；
+ * 3) npx 缓存安装（npx 安装只缓存到 npx 目录，不写全局 PATH，
  *    此时 'dsh' 不在 PATH 里，但 'npx @deepseek-ai/dsh' 仍可运行）。
  * 探测 npx 用 --no-install：只检查本地/全局/npx 缓存，缺失时不触发下载，
  * 从而保留「完全未安装时弹出安装提示」的既有流程。
- * @returns {Promise<{cmd: string, prefix: string[]} | null>}
+ * @param {{probe?: (cmd: string, args: string[]) => Promise<boolean>, desktop?: {cmd: string, installDir?: string} | null}} [opts]
+ *   测试注入口：probe 替换命令探测，desktop 替换桌面版定位结果。
+ * @returns {Promise<{cmd: string, prefix: string[], kind: string, installDir?: string} | null>}
  */
-async function resolveDshInvocation() {
+async function resolveDshInvocation(opts) {
+  const probe = (opts && opts.probe) || runCommandOk;
   const cmd = getDshCommand();
-  if (await runCommandOk(cmd, ['--version'])) {
-    return { cmd, prefix: [] };
+  if (await probe(cmd, ['--version'])) {
+    return { cmd, prefix: [], kind: 'command' };
   }
-  if (await runCommandOk('npx', ['--no-install', '@deepseek-ai/dsh', '--version'])) {
-    return { cmd: 'npx', prefix: ['--yes', '@deepseek-ai/dsh'] };
+  const hasDesktopOverride = !!opts && Object.prototype.hasOwnProperty.call(opts, 'desktop');
+  const desktop = hasDesktopOverride ? opts.desktop : await findDesktopDshCli();
+  if (desktop) {
+    if (await probe(desktop.cmd, ['--version'])) {
+      console.info('[DeepSeek Harness] 使用官网 Windows 桌面版内置 dsh：' + desktop.cmd);
+      return { cmd: desktop.cmd, prefix: [], kind: 'desktop', installDir: desktop.installDir };
+    }
+    console.warn('[DeepSeek Harness] 检测到官网桌面版，但其内置 dsh CLI 无法运行：' + desktop.cmd);
+  }
+  if (await probe('npx', ['--no-install', '@deepseek-ai/dsh', '--version'])) {
+    return { cmd: 'npx', prefix: ['--yes', '@deepseek-ai/dsh'], kind: 'npx' };
   }
   return null;
 }
@@ -248,7 +362,11 @@ async function ensureDshInstalled() {
       await installDsh();
       return true;
     } catch (e) {
-      vscode.window.showErrorMessage(`DeepSeek Harness 安装失败：${e.message}`);
+      // 桌面版用户通常没有 Node/npm：明确给出「装桌面版」这条路，别让用户去翻日志。
+      const hint = process.platform === 'win32'
+        ? '（也可改用官网 Windows 桌面版，扩展会自动识别它；或在 dshPanel.dshCommand 里直接指定其 CLI 路径）'
+        : '';
+      vscode.window.showErrorMessage(`DeepSeek Harness 安装失败：${e.message}${hint}`);
       return false;
     }
   });
@@ -263,23 +381,6 @@ async function ensureDshInstalled() {
     return true;
   }
   return false;
-}
-
-/**
- * 将服务地址转换为 webview 可访问的显示地址。
- * 本地场景返回原地址；Remote/vscode-server 场景通过 asExternalUri
- * 自动建立端口转发（可能是带本地转发端口的地址，也可能是 HTTPS 转发域名），
- * 把远程 3080 暴露到本地供 iframe 加载。
- * @returns {Promise<string>}
- */
-async function resolveDisplayUrl() {
-  const url = getUrl();
-  try {
-    const external = await vscode.env.asExternalUri(vscode.Uri.parse(url));
-    return external.toString();
-  } catch {
-    return url;
-  }
 }
 
 /**
@@ -374,6 +475,9 @@ function httpPostJson(url, payload, timeoutMs = 5000) {
     }
     const lib = target.protocol === 'https:' ? https : http;
     const data = JSON.stringify(payload);
+    // 远程模式下代理会拒绝无密钥请求：扩展自身的 /api 调用统一带上当前代理密钥
+    // （直连 dsh 时多一个自定义头，dsh 忽略，无副作用）。
+    const proxyAuth = (remoteAuthProxyKey() || {});
     const req = lib.request({
       hostname: target.hostname,
       port: target.port || (target.protocol === 'https:' ? 443 : 80),
@@ -381,7 +485,8 @@ function httpPostJson(url, payload, timeoutMs = 5000) {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        'Content-Length': Buffer.byteLength(data)
+        'Content-Length': Buffer.byteLength(data),
+        ...proxyAuth
       }
     }, (res) => {
       let body = '';
@@ -537,17 +642,61 @@ async function registerWorkspace() {
 
 const AUTH_PROXY_STATE_KEY = 'dsh.webAuth.tokenCache';
 
-/** 是否为本地（或 WSL Remote——宿主与 dsh 同机回环）且 dshPanel.url 指向回环地址的场景。 */
+/**
+ * dshPanel.url 是否指向回环地址（以扩展宿主视角）。
+ *
+ * 扩展声明 `extensionKind: ["workspace"]`，所以本地 / WSL Remote / Remote-SSH /
+ * Dev Containers 下扩展宿主都与 dsh 同机：只要 url 是回环地址，宿主就能直连，
+ * 受管认证代理也就能建起来（代理监听宿主回环）。区别只在「客户端 webview 能否
+ * 直接访问宿主的 127.0.0.1」——WSL 可以（VS Code 的 localhost 转发），真远程不行，
+ * 需要 asExternalUri 把代理端口转发一次（见 toClientUrl）。
+ * @returns {boolean}
+ */
 function isLocalLoopbackTarget() {
   try {
-    // WSL Remote 除外：扩展宿主与 dsh 同在 WSL 内（同机回环），代理前提与本地等价；
-    // 镜像网络 / VS Code 端口转发下 Windows 侧 webview 可达 WSL 的 127.0.0.1。
-    if (vscode.env && vscode.env.remoteName && vscode.env.remoteName !== 'wsl') return false;
     const u = new URL(getUrl());
     return ['127.0.0.1', 'localhost', '::1', '[::1]'].includes(u.hostname);
   } catch {
     return false;
   }
+}
+
+/**
+ * 是否处于「真远程」窗口：Remote-SSH / Dev Containers 等，客户端 webview 访问不到
+ * 宿主的 127.0.0.1，必须经 asExternalUri 把端口转发到客户端。
+ * WSL Remote 例外：VS Code 的 localhost 转发让 Windows 侧直达 WSL 回环，无需转发。
+ * @returns {boolean}
+ */
+function needsPortForwarding() {
+  return !!(vscode.env && vscode.env.remoteName && vscode.env.remoteName !== 'wsl');
+}
+
+/**
+ * 把「扩展宿主可达的地址」转换成「客户端 webview/浏览器可达的地址」。
+ * 真远程经 vscode.env.asExternalUri 建立端口转发（返回客户端本机转发地址或隧道域名），
+ * 本地 / WSL 原样返回（行为不变）。
+ * @param {string} url
+ * @returns {Promise<{url: string, forwarded: boolean}>} forwarded=false 表示无需转发或转发失败
+ */
+async function toClientUrlInfo(url) {
+  if (!needsPortForwarding()) return { url, forwarded: false };
+  try {
+    const external = await vscode.env.asExternalUri(vscode.Uri.parse(url));
+    const out = external && typeof external.toString === 'function' ? external.toString() : '';
+    return { url: out || url, forwarded: !!out };
+  } catch (e) {
+    console.warn('[DeepSeek Harness] asExternalUri 端口转发失败，退回宿主地址：' + ((e && e.message) || e));
+    return { url, forwarded: false };
+  }
+}
+
+/**
+ * toClientUrlInfo 的简写：只要地址（转发失败时退回宿主地址）。
+ * @param {string} url
+ * @returns {Promise<string>}
+ */
+async function toClientUrl(url) {
+  return (await toClientUrlInfo(url)).url;
 }
 
 /** 与 dsh 服务端一致的 Host 归一化：new URL('http://' + host).host。 */
@@ -602,14 +751,31 @@ function learnDshToken(tokenOrUrl) {
 
 /**
  * 确保本地受管认证代理已启动（127.0.0.1 随机端口，仅本机可访问）。
- * Remote 场景或目标非回环地址时返回 null（维持原直连行为）。
+ * 目标非回环地址、或真远程场景被 dshPanel.remoteAuthProxy 关闭时返回 null（维持原直连行为）。
  * @returns {Promise<object|null>}
  */
+/** 当前场景是否应启用受管认证代理：回环目标；真远程还需用户未关闭 remoteAuthProxy。 */
+function authProxyWanted() {
+  if (!isLocalLoopbackTarget()) return false;
+  if (needsPortForwarding() && !cfg().get('dshPanel.remoteAuthProxy', true)) return false;
+  return true;
+}
+
 async function ensureAuthProxy() {
-  if (!isLocalLoopbackTarget()) return null;
+  if (!authProxyWanted()) {
+    // 配置把代理关掉（或目标改成非回环）时，及时释放旧代理，避免残留监听。
+    if (authProxy) {
+      const old = authProxy;
+      authProxy = null;
+      authProxyPromise = null;
+      await old.close().catch(() => {});
+    }
+    return null;
+  }
+  const remote = needsPortForwarding();
   if (authProxy) {
-    if (authProxy.target() !== getUrl()) {
-      // 目标被改配置：旧 Cookie/令牌对新实例无效，整组重建。
+    if (authProxy.target() !== getUrl() || authProxy.remoteMode() !== remote) {
+      // 目标/远程模式被改配置：旧 Cookie/令牌/来源白名单对新实例无效，整组重建。
       const old = authProxy;
       authProxy = null;
       authProxyPromise = null;
@@ -622,7 +788,7 @@ async function ensureAuthProxy() {
   authProxyPromise = (async () => {
     let proxy;
     try {
-      proxy = await createAuthProxy(getUrl());
+      proxy = await createAuthProxy(getUrl(), { remote });
     } catch (e) {
       console.error('[DeepSeek Harness] 认证代理启动失败，回退直连：', e);
       return null;
@@ -660,17 +826,41 @@ async function ensureAuthProxy() {
  * - 转发时注入 Host 与 Cookie；遇 401 且持有令牌时自动重换并重试一次；
  * - 响应剥离 Set-Cookie（Cookie 由代理持有，不进 webview 第三方上下文）；
  * - WebSocket 升级按原头转发并双向透传（注入 Host/Cookie）。
+ *
+ * 远程窗口（Remote-SSH / Dev Containers）下的额外约束：代理经 asExternalUri 把端口
+ * 转发给客户端后，服务器回环上就多了一个可被同机其他用户枚举到的端口。因此 remote
+ * 模式会对**无密钥请求**要求 Host 属于「扩展已经转发给客户端的 authority」白名单
+ * （acceptClientAuthority 登记），扩展自身的请求用 x-dsh-proxy-key 头放行；其他一律 403。
+ * 本地模式保持原行为（Host 即代理自身 authority），不做额外校验。
  * @param {string} targetUrl dsh web 服务地址
+ * @param {{remote?: boolean}} [options]
  * @returns {Promise<object>} 代理句柄
  */
-function createAuthProxy(targetUrl) {
+function createAuthProxy(targetUrl, options) {
   return new Promise((resolve, reject) => {
     const target = new URL(targetUrl);
     const targetPort = Number(target.port) || (target.protocol === 'https:' ? 443 : 80);
+    const remoteMode = !!(options && options.remote);
+    // 扩展自身访问代理的共享密钥（远程模式下无密钥只能靠客户端 authority 白名单）。
+    const proxyKey = crypto.randomBytes(24).toString('base64url');
+    const clientAuthorities = new Set(); // 已转发给客户端的 authority（远程模式白名单）
     const cookies = new Map(); // authority -> 'name=value'
     const exchanges = new Map(); // authority -> Promise（并发去重）
     let token = null;
     let port = 0;
+
+    /** 扩展自身请求带的密钥头（本地模式同样发送，代理侧本地不校验，无副作用）。 */
+    function keyHeaders() {
+      return { 'x-dsh-proxy-key': proxyKey };
+    }
+
+    /** 远程模式：无密钥请求只放行已登记给客户端的 authority。 */
+    function allowsRequest(req) {
+      if (!remoteMode) return true;
+      if (req.headers && req.headers['x-dsh-proxy-key'] === proxyKey) return true;
+      const authority = normAuthority(req.headers && req.headers.host);
+      return !!(authority && clientAuthorities.has(authority));
+    }
 
     /** 为指定 authority 换发 Cookie（GET /?token=，Host 指向代理自身 authority）。 */
     function exchangeFor(authority) {
@@ -746,6 +936,7 @@ function createAuthProxy(targetUrl) {
             host: '127.0.0.1',
             port,
             path: '/',
+            headers: keyHeaders(),
             agent: new http.Agent({ keepAlive: false })
           }, (res) => {
             res.resume();
@@ -830,6 +1021,13 @@ function createAuthProxy(targetUrl) {
 
     /** WebSocket 升级透传（注入 Host/Cookie，原始字节双向转发）。 */
     function onUpgrade(req, socket, head) {
+      if (!allowsRequest(req)) {
+        try {
+          socket.write('HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n');
+          socket.destroy();
+        } catch { /* noop */ }
+        return;
+      }
       const authority = normAuthority(req.headers.host) || `127.0.0.1:${port}`;
       const cookie = cookies.get(authority) || null;
       const headers = { ...req.headers };
@@ -887,6 +1085,14 @@ function createAuthProxy(targetUrl) {
     }
 
     const server = http.createServer((req, res) => {
+      if (!allowsRequest(req)) {
+        // 远程模式：无密钥且 Host 不在客户端转发白名单（同机他人枚举到该端口的典型请求）。
+        try {
+          res.writeHead(403, { 'content-type': 'text/plain; charset=utf-8' });
+          res.end('DeepSeek Harness 认证代理：拒绝未授权的来源');
+        } catch { /* noop */ }
+        return;
+      }
       forward(req, res).catch(() => { try { res.destroy(); } catch { /* noop */ } });
     });
     server.on('upgrade', onUpgrade);
@@ -898,6 +1104,7 @@ function createAuthProxy(targetUrl) {
       resolve({
         target: () => targetUrl,
         port: () => port,
+        remoteMode: () => remoteMode,
         baseUrl: () => `http://127.0.0.1:${port}`,
         urlForTab: () => {
           const u = new URL(`http://127.0.0.1:${port}`);
@@ -907,9 +1114,18 @@ function createAuthProxy(targetUrl) {
         hasCookieForBase: () => cookies.has(`127.0.0.1:${port}`),
         hasCookieForTab: () => cookies.has(`localhost:${port}`),
         token: () => token,
+        /** 扩展自身访问代理的密钥头（远程模式下无密钥请求会被 403）。 */
+        keyHeaders,
+        /** 登记一个已转发给客户端的 authority（远程模式白名单，来自 asExternalUri 结果）。 */
+        acceptClientAuthority: (authority) => {
+          const norm = normAuthority(authority);
+          if (norm) clientAuthorities.add(norm);
+        },
         status: () => ({
           target: targetUrl,
           proxy: `http://127.0.0.1:${port}`,
+          remoteMode,
+          clientAuthorities: [...clientAuthorities],
           tokenKnown: !!token,
           authedAuthorities: [...cookies.keys()]
         }),
@@ -953,14 +1169,6 @@ function createAuthProxy(targetUrl) {
   });
 }
 
-/**
- * 为面板解析最终展示地址：
- * - 代理可用且 Cookie 就绪 → 代理地址（webview 由此获得无感认证）；
- * - 代理可用但未认证且上游 401 → { unauthorized: true }（引导接管）；
- * - 其余（Remote / 非回环 / 老版 dsh 无认证）→ 原直连展示地址。
- * @param {boolean} isTab 是否标签页模式
- * @returns {Promise<{displayUrl: string} | {unauthorized: true}>}
- */
 /** 无代理时对 dsh 首页做直接状态探测（401 = 新版需要认证，用于让引导可达）。 */
 function probeDirectIndexStatus(timeoutMs = 4000) {
   return new Promise((done) => {
@@ -992,36 +1200,54 @@ function probeDirectIndexStatus(timeoutMs = 4000) {
  * - 代理可用但未认证且上游 401 → { unauthorized: true }（引导接管）；
  * - 无代理（真远程/非回环）但直连探测到 401 → { unauthorized: true }（让中文引导
  *   与「在浏览器中打开（携带令牌）」可达，不再让用户面对英文 401 原文）；
- * - 其余（本地老版 dsh / 无认证远程）→ 原直连展示地址。
+ * - 其余（本地老版 dsh / 无认证远程）→ 原直连展示地址；
+ * - 真远程还需要把地址经 asExternalUri 转发给客户端：转发失败时返回
+ *   { forwardFailed: true, reason }，由调用方给出可读错误页而不是白屏。
  * @param {boolean} isTab 是否标签页模式
- * @returns {Promise<{displayUrl: string} | {unauthorized: true}>}
+ * @returns {Promise<{displayUrl: string} | {unauthorized: true} | {forwardFailed: true, reason: string}>}
  */
 async function resolvePanelTarget(isTab) {
-  let displayUrl = isTab ? getTabDisplayUrl(await resolveDisplayUrl()) : await resolveDisplayUrl();
   const proxy = await ensureAuthProxy();
-  if (!proxy) {
-    // 真远程/非回环：没有代理可注入 Cookie，但至少要给用户可见的中文引导。
-    const status = await probeDirectIndexStatus();
-    if (status === 401) return { unauthorized: true };
-    return { displayUrl };
-  }
-  await proxy.waitAuthed(8000);
-  if (proxy.hasCookieForBase()) {
-    displayUrl = isTab ? proxy.urlForTab() : proxy.baseUrl();
-    // 端到端就绪确认：代理链路（注入 Cookie → 上游 → 回包）拿到 200 才交给
-    // iframe，避免 dsh 半就绪（端口已监听但插件/连接未加载完）导致首次加载失败。
-    const deadline = Date.now() + 6000;
-    let probeStatus = 0;
-    while (Date.now() < deadline) {
-      probeStatus = await proxy.probeSelf(2500);
-      if (probeStatus === 200) break;
-      await sleep(400);
+  let displayUrl = null;
+  if (proxy) {
+    await proxy.waitAuthed(8000);
+    if (proxy.hasCookieForBase()) {
+      displayUrl = isTab ? proxy.urlForTab() : proxy.baseUrl();
+      // 端到端就绪确认：代理链路（注入 Cookie → 上游 → 回包）拿到 200 才交给
+      // iframe，避免 dsh 半就绪（端口已监听但插件/连接未加载完）导致首次加载失败。
+      const deadline = Date.now() + 6000;
+      while (Date.now() < deadline) {
+        if ((await proxy.probeSelf(2500)) === 200) break;
+        await sleep(400);
+      }
     }
-    return { displayUrl };
   }
-  const status = await proxy.probeIndexStatus();
-  if (status === 401) return { unauthorized: true };
-  return { displayUrl }; // 老版本 dsh（无认证），照旧直连
+  if (!displayUrl) {
+    displayUrl = isTab ? getTabDisplayUrl(getUrl()) : getUrl();
+    // 无代理（非回环 / 远程代理已关闭 / 创建失败）或代理未认证：探测直连状态，
+    // 401 时返回引导（老版本 dsh 无认证则照旧直连）。
+    const status = proxy ? await proxy.probeIndexStatus() : await probeDirectIndexStatus();
+    if (status === 401) return { unauthorized: true };
+  }
+  // 真远程（Remote-SSH / Dev Containers）：把「宿主可达」的地址经 asExternalUri
+  // 转发成「客户端可达」的地址，webview iframe 才能加载。
+  const info = await toClientUrlInfo(displayUrl);
+  if (needsPortForwarding() && !info.forwarded) {
+    // asExternalUri 失败（端口转发被禁用/被拒）：如果继续返回宿主地址，webview 只会
+    // 白屏或连接失败且没有可读原因——这里直接返回可读错误，便于用户自查。
+    return {
+      forwardFailed: true,
+      reason: '面板地址端口转发失败：无法把服务器回环地址经 VS Code 端口转发暴露给客户端' +
+        '（请确认 Remote 会话允许端口转发，或检查 remote.autoForwardPorts / 代理设置）。'
+    };
+  }
+  const clientUrl = info.url;
+  if (proxy && clientUrl !== displayUrl) {
+    // 登记转发后的 authority：远程模式下代理只放行来自该 authority 的匿名请求，
+    // 同机他人直接扫宿主回环端口会被 403。
+    try { proxy.acceptClientAuthority(new URL(clientUrl).host); } catch { /* noop */ }
+  }
+  return { displayUrl: clientUrl };
 }
 
 /**
@@ -1078,7 +1304,16 @@ function maybeGuideAuth(isTab) {
   });
 }
 
-/** 扩展自身访问 dsh /api 的基址：代理就绪时走代理（自动带认证）。 */
+/** 当前代理的密钥头；无代理时返回 null（供扩展自身的 /api 请求附加）。 */
+function remoteAuthProxyKey() {
+  return (authProxy && typeof authProxy.keyHeaders === 'function') ? authProxy.keyHeaders() : null;
+}
+
+/**
+ * 扩展自身访问 dsh /api 的基址：代理就绪时走代理（自动带认证）。
+ * 远程窗口下代理同样可用（Remote-SSH / Dev Containers 中扩展宿主与 dsh 同机），
+ * 只是 iframe 侧还要把代理端口经 asExternalUri 转发给客户端（见 resolvePanelTarget）。
+ */
 async function apiBase() {
   if (isLocalLoopbackTarget()) {
     const proxy = await ensureAuthProxy();
@@ -1094,13 +1329,34 @@ async function apiBase() {
 }
 
 /**
+ * 「在浏览器中打开」的目标地址：优先携带启动令牌的认证链接（真实浏览器顶层导航
+ * 可正常换取 Cookie）；真远程再经 asExternalUri 转发到客户端——否则在 Remote-SSH
+ * 下打开的是**客户端本机**的 127.0.0.1:3080，而不是服务器上的 DSH。
+ * @returns {Promise<string>}
+ */
+async function resolveBrowserUrl() {
+  let url = getUrl();
+  const proxy = await ensureAuthProxy();
+  if (proxy && proxy.token()) {
+    url = proxy.authenticatedUrl();
+  } else if (dshLaunchToken) {
+    try {
+      const u = new URL(url);
+      u.searchParams.set('token', dshLaunchToken);
+      url = u.toString();
+    } catch { /* 保持裸地址 */ }
+  }
+  return toClientUrl(url);
+}
+
+/**
  * 启动 dsh web 进程。Windows 通过 shell 执行以命中 dsh.cmd shim。
  * 兼容新旧版本：--no-open 先经 `dsh web --help` 探测，老版本不支持时不传，
  * 避免未知参数导致启动失败。
  * @returns {Promise<import('child_process').ChildProcess>}
  */
 async function startDsh() {
-  // 使用 ensureDshInstalled 解析出的启动方式（全局 dsh 或 npx）。
+  // 使用 ensureDshInstalled 解析出的启动方式（PATH 上的 dsh / 官网桌面版内置 CLI / npx）。
   // 兜底回退到配置的命令，避免异常时序下拿到空值。
   const inv = dshInvocation || { cmd: getDshCommand(), prefix: [] };
   // host/port 均已净化（getHost 白名单 / getPort 整数），cmd 经 sanitizeCommand
@@ -1125,9 +1381,9 @@ async function startDsh() {
     }
   }
   // Windows 经 cmd.exe 启动：含空格的 cmd 需区分两种形态——
-  //   a) 单个存在的可执行文件（带空格目录）→ 整体加引号；
+  //   a) 单个存在的可执行文件（带空格目录，含官网桌面版内置 dsh.cmd）→ 整体加引号；
   //   b) 多 token 命令行前缀（如 "node C:\x\dsh.js"）→ 原样透传由 shell 分词（≤0.8.33 行为）。
-  const cmdText = (process.platform === 'win32' && /\s/.test(inv.cmd) && fs.existsSync(inv.cmd)) ? '"' + inv.cmd + '"' : inv.cmd;
+  const cmdText = shellCommandText(inv.cmd);
   const child = spawn(cmdText, args, {
     cwd: getWorkspaceDir(),
     shell: process.platform === 'win32',
@@ -1631,6 +1887,7 @@ ${sidebarToolbarHtml}
   var HOST_ID = ${jsonForScript(VSCODE_HOST_ID)};
   var PLUGIN_ID = ${jsonForScript(FILE_LINK_PLUGIN_SOURCE)};
   var LAYOUT_ID = ${jsonForScript(LAYOUT_PLUGIN_SOURCE)};
+  var OPEN_PLUGIN_ID = ${jsonForScript(OPEN_EXTERNAL_PLUGIN_SOURCE)};
   var FRAME_ORIGIN = ${jsonForScript(origin)};
   var fileLinkMode = ${jsonForScript(fileLinkMode)};
   // 工作区钉住：独立消息类型（不复用 ack——文件链接插件的 layoutOnly 判别会被
@@ -1670,6 +1927,7 @@ ${sidebarToolbarHtml}
     if (!w) return;
     try { w.postMessage(payload, FRAME_ORIGIN); } catch (e) { /* 页面正在切换：忽略 */ }
   }
+
 
   /** 面板可视宽度（裁剪前）。 */
   function stageWidth() {
@@ -1734,11 +1992,19 @@ ${sidebarToolbarHtml}
     }
   }
 
-  /** 握手回执（文件链接）：插件据此确认「外层是本 VS Code 面板」，off 时保持惰性。 */
+  /** 握手回执（文件链接 / 外链）：插件据此确认「外层是本 VS Code 面板」。
+   *  fileLinks=false 时文件链接插件保持惰性；openExternal=true 允许转交外链/登录链接。 */
   function ackFileLinks() {
-    if (fileLinkMode === 'off') return;
+    var ack = {
+      source: HOST_ID,
+      type: 'ack',
+      fileLinks: fileLinkMode !== 'off',
+      openExternal: true,
+      mode: fileLinkMode
+    };
     // diff 模式额外告知：点击时会带「会话 + 轮」坐标，插件据此才去取。
-    postToFrame({ source: HOST_ID, type: 'ack', fileLinks: true, mode: fileLinkMode, diff: fileLinkMode === 'diffAndOpen' });
+    ack.diff = fileLinkMode === 'diffAndOpen';
+    postToFrame(ack);
   }
 
   /** 握手回执（侧栏测量）：show 且无手动覆盖时完全不介入。 */
@@ -1778,8 +2044,7 @@ ${sidebarToolbarHtml}
   function ackFrame() {
     ackFileLinks();
     ackLayout();
-    ackWorkspacePin();
-  }
+    ackWorkspacePin();  }
   if (frame) {
     // iframe 每次加载（刷新 / 重启 dsh web）后重新握手，兼容插件先于或后于本脚本就绪。
     frame.addEventListener('load', function () {
@@ -1860,6 +2125,22 @@ ${sidebarToolbarHtml}
           reveal.change = { sessionId: change.sessionId, turn: change.turn };
         }
         vscode.postMessage(reveal);
+      }
+      return;
+    }
+    if (data.source === OPEN_PLUGIN_ID) {
+      // 外链/登录链接插件：DSH 页面里的 window.open 无法真正打开浏览器窗口，
+      // 由插件把 http(s) 链接转交宿主，用系统默认浏览器（Remote/WSL 下即客户端）打开。
+      if (!fromOurFrame(event)) return;
+      if (data.type === 'hello') {
+        ackFrame();
+        return;
+      }
+      if (data.type === 'open' && typeof data.url === 'string') {
+        var link = data.url.trim();
+        if (link.length > 0 && link.length <= 8192 && /^https?:\\/\\//i.test(link)) {
+          vscode.postMessage({ type: 'dsh-open-link', url: link });
+        }
       }
       return;
     }
@@ -1986,11 +2267,17 @@ const CLIPBOARD_TIMEOUT_MS = 1500;
 // DSH web profile，不经 npm）：点对话里的工作区文件/文件夹链接时，改为在本窗口的
 // VS Code 资源管理器中定位并打开。
 const FILE_LINK_PLUGIN_NAME = 'dsh-vscode-file-links';
+// 内置分发的外链/登录链接插件（源码在 dsh-plugins/ 目录，随扩展文件直接写入
+// DSH web profile，不经 npm）：DSH 页面被跨源 iframe 内嵌时 window.open 打不开
+// 浏览器窗口（DeepSeek 账号登录正是这条路径），由插件把链接交给宿主的
+// vscode.env.openExternal，在客户端（如 WSL/Remote 下的 Windows 本机）浏览器打开。
+const OPEN_EXTERNAL_PLUGIN_NAME = 'dsh-vscode-open-external';
 // 插件源码所在目录（打包进 .vsix，运行时按单一源头读取，避免模板字面量转义问题）。
 const BUNDLED_PLUGINS_DIR = 'dsh-plugins';
 // DSH 页面（iframe）与 webview 之间的握手 / 转发协议标识。
 const VSCODE_HOST_ID = 'dsh-vscode-host';
 const FILE_LINK_PLUGIN_SOURCE = 'dsh-vscode-file-links';
+const OPEN_EXTERNAL_PLUGIN_SOURCE = 'dsh-vscode-open-external';
 // 文件链接点击行为：资源管理器定位 + 打开文件 / 定位 + 展示变更 diff / 仅定位 /
 // 不接管（保持 DSH 行为）。
 const FILE_LINK_ACTION_KEY = 'dshPanel.workspaceFileLinkAction';
@@ -2144,20 +2431,22 @@ async function installPluginViaNpm(profileDir, plugin) {
   }
 }
 
-/** 尝试用官方 dsh plugin add 安装（依赖 dsh + pnpm）；成功返回 true。 */
+/** 尝试用官方 dsh plugin add 安装（依赖 dsh + pnpm；桌面版则用其自带 pnpm）；成功返回 true。 */
 function tryDshPluginAdd(plugin) {
   // 安全面守卫：plugin 仅允许内置常量（win32 经 shell 拼接）。
   if (plugin !== DSH_PLUGIN_NAME) {
     return Promise.resolve(false);
   }
   return new Promise((resolve) => {
-    const cmd = process.platform === 'win32' ? 'dsh.cmd' : 'dsh';
+    // 用已解析的启动方式（PATH 上的 dsh / 官网桌面版内置 CLI / npx）：桌面版用户
+    // 没有全局 dsh，写死 'dsh.cmd' 会让配套插件永远装不上。
+    const inv = dshInvocation || { cmd: process.platform === 'win32' ? 'dsh.cmd' : 'dsh', prefix: [] };
     const env = Object.assign({}, process.env, {
       // npm 全局 bin 前置，避开旧 corepack shim 干扰 pnpm
       Path: path.join(os.homedir(), 'AppData', 'Roaming', 'npm') + path.delimiter + (process.env.Path || process.env.PATH || ''),
       npm_config_registry: NPMJS_REGISTRY
     });
-    const child = spawn(cmd, ['plugin', '--profile', 'web', 'add', plugin], {
+    const child = spawn(shellCommandText(inv.cmd), [...inv.prefix, 'plugin', '--profile', 'web', 'add', plugin], {
       stdio: 'ignore',
       env,
       windowsHide: true,
@@ -2579,6 +2868,58 @@ function ensureChangesPlugin(profileDir) {
 }
 
 /**
+ * 内置外链/登录链接插件 dsh-vscode-open-external 的文件清单（相对路径 → 内容）。
+ * @returns {Record<string, string>} 相对路径 → 文件内容
+ */
+function openExternalPluginFiles() {
+  const base = path.join(__dirname, BUNDLED_PLUGINS_DIR, OPEN_EXTERNAL_PLUGIN_NAME);
+  const rels = ['package.json', 'cordis.patch.yml', 'lib/index.js', 'lib/client.js'];
+  const files = {};
+  for (const rel of rels) {
+    files[rel] = fs.readFileSync(path.join(base, rel), 'utf8');
+  }
+  return files;
+}
+
+/** 内置外链/登录链接插件的版本（以插件自己的 package.json 为单一源头）。 */
+function openExternalPluginVersion() {
+  try {
+    return JSON.parse(openExternalPluginFiles()['package.json']).version || '0.0.0';
+  } catch {
+    return '0.0.0';
+  }
+}
+
+/**
+ * 确保内置插件 dsh-vscode-open-external 已落盘并声明（不经 npm）。
+ * @returns {Promise<boolean>} 本次是否发生新增/升级（true 时需重启 dsh web 生效）。
+ */
+async function ensureOpenExternalPlugin(profileDir) {
+  try {
+    const version = openExternalPluginVersion();
+    const installed = await installedPluginVersion(profileDir, OPEN_EXTERNAL_PLUGIN_NAME);
+    if (installed === version) {
+      await ensureProfileDeclaration(profileDir, OPEN_EXTERNAL_PLUGIN_NAME, null);
+      return false; // 版本一致，无需写入
+    }
+    const files = openExternalPluginFiles();
+    const base = path.join(profileDir, 'node_modules', OPEN_EXTERNAL_PLUGIN_NAME);
+    for (const rel of Object.keys(files)) {
+      const dest = path.join(base, rel);
+      await fs.promises.mkdir(path.dirname(dest), { recursive: true });
+      await fs.promises.writeFile(dest, files[rel], 'utf8');
+    }
+    // dependencies 不写入该包（npm 注册表上没有），只登记 bundles 供 DSH 加载。
+    await ensureProfileDeclaration(profileDir, OPEN_EXTERNAL_PLUGIN_NAME, null);
+    return true;
+  } catch (e) {
+    console.error(`[DeepSeek Harness] 安装内置插件 ${OPEN_EXTERNAL_PLUGIN_NAME} 失败：`, e);
+    vscode.window.showWarningMessage(`安装 DSH 外链打开插件 ${OPEN_EXTERNAL_PLUGIN_NAME} 失败：${e.message}`);
+    return false;
+  }
+}
+
+/**
  * 工作区文件链接的点击行为配置。
  * @returns {'revealAndOpen'|'revealOnly'|'off'}
  */
@@ -2678,6 +3019,14 @@ async function ensureDshPlugins() {
     // 开关关闭时不安装/不更新——插件不握手，面板行为与本能力之前完全一致。
     if (workspacePinEnabled()) {
       if (await ensureWorkspacePlugin(profileDir)) {
+        changed = true;
+      }
+    }
+    // 内置外链/登录链接插件（文件随扩展直接写入，不走 npm）：
+    // 面板内 window.open（典型：DeepSeek 账号登录的授权页）改为在客户端系统浏览器打开。
+    // 可经 dshPanel.installOpenExternalPlugin 关闭。
+    if (cfg().get('dshPanel.installOpenExternalPlugin', true)) {
+      if (await ensureOpenExternalPlugin(profileDir)) {
         changed = true;
       }
     }
@@ -3342,7 +3691,9 @@ async function preparePanelHtml(isTab) {
     return {
       ok: false,
       kind: 'not-installed',
-      reason: '未检测到 DeepSeek Harness (dsh)，且已取消安装。请手动安装后点击“刷新”。'
+      reason: process.platform === 'win32'
+        ? '未检测到 DeepSeek Harness（npm 版 dsh 或官网 Windows 桌面版），且已取消安装。请安装后点击“刷新”。'
+        : '未检测到 DeepSeek Harness (dsh)，且已取消安装。请手动安装后点击“刷新”。'
     };
   }
 
@@ -3364,9 +3715,12 @@ async function preparePanelHtml(isTab) {
 
   // 服务就绪后，尽力把 VSCode 当前工作区注册进 DSH 工作区列表（不阻塞渲染）。
   registerWorkspace().catch(() => {});
-  // 解析最终展示地址：本地场景走受管认证代理（无感通过 dsh web 浏览器认证）；
-  // Remote / 非回环 / 老版 dsh（无认证）维持原直连显示地址（远程场景经端口转发）。
+  // 解析最终展示地址：回环目标走受管认证代理（无感通过 dsh web 浏览器认证）；
+  // 真远程（Remote-SSH / Dev Containers）再把地址经 asExternalUri 转发到客户端。
   const target = await resolvePanelTarget(isTab);
+  if (target.forwardFailed) {
+    return { ok: false, kind: 'unreachable', reason: target.reason };
+  }
   if (target.unauthorized) {
     maybeGuideAuth(isTab);
     const hasProxy = !!authProxy;
@@ -4961,16 +5315,17 @@ async function showChatStatus() {
 async function authStatusText() {
   const proxy = await ensureAuthProxy();
   if (!proxy) {
-    return '未启用受管认证代理（Remote 场景或目标非回环地址），面板走直连';
+    return '未启用受管认证代理（目标非回环地址，或远程场景已在设置中关闭），面板走直连';
   }
   const s = proxy.status();
+  const mode = s.remoteMode ? '远程模式' : '本地模式';
   if (proxy.hasCookieForBase()) {
-    return '已认证（受管代理 ' + s.proxy + '）';
+    return '已认证（' + mode + '受管代理 ' + s.proxy + '）';
   }
   if (!s.tokenKnown) {
     return '未认证（尚未捕获 dsh 启动令牌；若 dsh 正在运行且返回 401，请重启 dsh web 由扩展接管）';
   }
-  return '令牌已捕获，Cookie 换发中/失败（代理 ' + s.proxy + '）';
+  return '令牌已捕获，Cookie 换发中/失败（' + mode + '受管代理 ' + s.proxy + '）';
 }
 
 function activate(context) {
@@ -5092,21 +5447,7 @@ function activate(context) {
   });
 
   const openBrowserCmd = vscode.commands.registerCommand('dshPanel.openInBrowser', async () => {
-    // 新版 dsh web 有浏览器认证：优先打开携带启动令牌的认证链接（真实浏览器
-    // 顶层导航可正常换取 Cookie）；有代理则用代理合成的认证地址，无代理时
-    // 也尽量用 stdout 捕获到的令牌拼链接，让用户始终有手动认证出路。
-    let url = getUrl();
-    const proxy = await ensureAuthProxy();
-    if (proxy && proxy.token()) {
-      url = proxy.authenticatedUrl();
-    } else if (dshLaunchToken) {
-      try {
-        const u = new URL(url);
-        u.searchParams.set('token', dshLaunchToken);
-        url = u.toString();
-      } catch { /* 保持裸地址 */ }
-    }
-    vscode.env.openExternal(vscode.Uri.parse(url));
+    vscode.env.openExternal(vscode.Uri.parse(await resolveBrowserUrl()));
   });
 
   const restartCmd = vscode.commands.registerCommand('dshPanel.restart', async () => {
@@ -5308,6 +5649,11 @@ module.exports.__internals = {
   sidebarUiState,
   shouldInstallLayoutPlugin,
   shouldInstallClipboardPlugin,
+  openExternalPluginFiles,
+  openExternalPluginVersion,
+  ensureOpenExternalPlugin,
+  OPEN_EXTERNAL_PLUGIN_NAME,
+  OPEN_EXTERNAL_PLUGIN_SOURCE,
   buildIframeHtml,
   handleWebviewMessage,
   resolveWorkspaceTarget,
@@ -5320,6 +5666,7 @@ module.exports.__internals = {
   checkDshModelDrift,
   registerDshModelProvider,
   dshRpc,
+  httpPostJson,
   fetchSessionHistory,
   dshEventText,
   applyDshEvents,
@@ -5328,8 +5675,19 @@ module.exports.__internals = {
   getHost,
   getPort,
   getDshCommand,
+  shellCommandText,
+  parseRegInstallLocations,
+  pickDesktopCli,
+  probeDesktopDshCli,
+  findDesktopDshCli,
+  resolveDshInvocation,
   runCommandOk,
   runCommandOutput,
   isLocalLoopbackTarget,
+  needsPortForwarding,
+  toClientUrl,
+  authProxyWanted,
+  resolvePanelTarget,
+  resolveBrowserUrl,
   probeDirectIndexStatus
 };

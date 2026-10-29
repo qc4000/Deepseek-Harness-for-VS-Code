@@ -62,12 +62,15 @@ CI 只认退出码，不看输出格式。
 | `dsh-model-mapping.test.js` | 38 | 条目 id/名称（改 id 会丢用户已选）；非 `dsh` 条目映射到 DSH 在册模型；provider info 字段合法（成本串/上限/capabilities/推理档位 schema）；`findMissingDshModels` 漂移检测；诊断文件落临时 HOME |
 | `dsh-sidebar.test.js` | 61（有 1 条 zoom 断言待随 1.0.3 回退更新，既有问题、与 005 无关） | 侧栏裁剪中继脚本（`vm` 真跑）：stage/clip 分层与缩放解耦、auto/show/hide × 宽度、280/420/56/0 与 `+4` 手柄余量、异常测量丢弃、按钮切换与上报、宿主 `toggle`/`config` 消息、未测量时不裁并上报 unavailable；测量插件文件/声明/语法/安装幂等/`show` 不安装；插件客户端仿真（握手前静默、上报、拖动重报、折叠标记、卸载清理、元素缺失不误报） |
 | `dsh-stream-events.test.js` | 22 | `assistant/message` 只回写 text 块；旧 `text-delta` 增量；历史 `block-end` 不重复；`seq` 游标推进；`turn/end` 结束与异常原因；空事件列表安全 |
-| `file-link-bridge.test.js` | 37 | `vm` 真跑 webview 中继脚本：握手 ack（含重试）、reveal 转发、result 回传、origin/source 校验、`off` 模式不转发；`dsh-open-link` / `insert-selection` 既有中继不受影响；diff 模式 `ack.diff`、轮坐标透传与非法坐标丢弃、`reveal-ack` 回传 |
+| `file-link-bridge.test.js` | 38 | `vm` 真跑 webview 中继脚本：握手 ack（含重试）、reveal 转发、result 回传、origin/source 校验、`off` 模式不转发；`dsh-open-link` / `insert-selection` 既有中继不受影响；diff 模式 `ack.diff`、轮坐标透传与非法坐标丢弃、`reveal-ack` 回传；`off` 模式 ack 仍允许登录/外链 |
 | `file-link-client-sim.test.js` | 46 | 插件客户端仿真：未 ack 前不介入；命中按钮 → 阻断 + 发 reveal；`ok=true` 不回放 / `ok=false` 回放 / 超时回放；修饰键不接管；非链接按钮不接管；独立浏览器不打招呼；卸载后清定时器；diff 模式带轮坐标、`reveal-ack` 把等待从 2.5 s 放宽到 6 s；坐标两条退路（无 `ctx.get` 只有属性访问、祖先无标记取「前一个」标记行）；**布局 ack（`{layout:true}`）不得覆盖 `diffMode`**（真机根因回归）；取不到坐标不带（AC-7） |
 | `file-link-diff.test.js` | 74 | 轮级 diff 宿主侧：坐标净化、匹配候选、标题（轮级 vs HEAD）、二进制/体积判定；404 三种含义（`released`/`no-record`/`unavailable`）与 `no-text` 的原因映射及各自文案；`dsh-diff` 虚拟文档存取与容量淘汰；三级降级（P1 → P0 → L0）与提示文案；git 基线（无改动/非仓库/空仓库/二进制/超大）；`handleWebviewMessage` 接单回执与非法坐标丢弃 |
 | `macos-keysim.test.js` | 24 | macOS UA 下逐键行为与 IME/修饰键过滤；Windows 与非 iframe 场景完全不激活 |
-| `remote-mode.test.js` | 15 | `isLocalLoopbackTarget`：WSL Remote 放行、SSH/Dev Container 禁用、非回环禁用；无服务时 `probeDirectIndexStatus` 安全返回 0 |
-| `workspace-file-link.test.js` | 84 | 插件文件齐全/声明/语法；中继脚本语法 + 协议字段；路径解析（相对多工作区、绝对、`../` 越界、不存在、`:12`/`#L12` 行号）；`revealAndOpen`/`revealOnly`/`off`；安装幂等且不写 `dependencies`；`diffAndOpen` 枚举与 `dsh-vscode-changes` 安装（只宿主半边、登记 bundles、幂等、落盘语法通过） |
+| `remote-mode.test.js` | 34 | 重写（上游）：URL-only 回环判定、`needsPortForwarding` 分类、远程受管认证代理开关与实例重建、转发失败的可读错误 |
+| `remote-auth-proxy.test.js` | 28 | 真远程受管认证代理（上游）：真实 TCP 转发器模拟 VS Code 端口转发；客户端 authority 的 Cookie 换发、远程 403 拦截、扩展侧 `/api` 密钥头、浏览器打开地址转发、面板 CSP 与 `asExternalUri` 失败报错 |
+| `open-external-plugin.test.js` | 43 | 远端登录外链插件（上游）：插件文件/声明完整性、握手前后行为、`about:blank` 占位导航转交、非法 scheme/超长链接回退、webview 中继（ack/open/边界/off 仍可登录）、宿主只放行 http(s) |
+| `desktop-app-support.test.js` | 37 | 官网 Windows 桌面版（上游）：安装目录定位（注册表 InstallLocation / 默认目录）、启动优先级（PATH → 桌面版 CLI → npx）、含空格路径的 cmd.exe 引号、源码级接线；`DESKTOP_CLI_REL` 用 win32 语义，Linux CI 同样可测 |
+| `workspace-file-link.test.js` | 85 | 插件文件齐全/声明/语法；中继脚本语法 + 协议字段；路径解析（相对多工作区、绝对、`../` 越界、不存在、`:12`/`#L12` 行号）；`revealAndOpen`/`revealOnly`/`off`；安装幂等且不写 `dependencies`；`diffAndOpen` 枚举与 `dsh-vscode-changes` 安装（只宿主半边、登记 bundles、幂等、落盘语法通过） |
 | `workspace-pin.test.js` | 73 | 工作区跟随（006）：插件包声明（`dsh.client.platform=web`、bundle patch、无依赖）与「不碰 DOM/localStorage」静态约束；`workspacePinPath`/`workspacePinEnabled`/路径形状（空窗口、开关、URL、控制字符、超长）；中继脚本独立消息 `workspace-pin`（origin/source 双校验、8s 超时上报、结果状态白名单与 reason 截断、特殊字符路径不破坏脚本）；客户端仿真（未握手惰性、`create`+`openWorkspace` 各一次、已就位不动作、服务缺失上报 unsupported、失败上报 failed、未就绪轮询、重复下发幂等、非父级消息不认）；`ensureWorkspacePlugin` 落盘/登记/幂等 |
 | `e2e-real-dsh.test.js` | — | 真实 dsh：启动参数与扩展一致；捕获 `dsh web:` 令牌；裸地址 401；经代理 200；真实 RPC 信封调用；结束清理 |
 

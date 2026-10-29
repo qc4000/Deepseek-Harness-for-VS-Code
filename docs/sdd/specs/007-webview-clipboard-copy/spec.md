@@ -133,7 +133,7 @@ VS Code 的 webview 通过 `setPermissionRequestHandler` / `setPermissionCheckHa
 
 | 日期 | 方式 | 结论 |
 | --- | --- | --- |
-| 2026-10-29 | `npm test`（`clipboard-plugin.test.js` 42 项、`clipboard-bridge.test.js` 16 项；全量 16 套 / 617 项断言） | 通过 |
+| 2026-10-29 | `npm test`（`clipboard-plugin.test.js` 42 项、`clipboard-bridge.test.js` 16 项；合并上游后全量 19 套 / 746 项断言） | 通过 |
 | 2026-10-29 | `npm run test:all`（e2e） | 不适用：本次未改动 DSH 进程内契约，仅页面侧剪贴板回退 |
 | 2026-10-29 | 实机 F5（待验证） | 待验证：需在面板内点代码块复制按钮确认到位 |
 

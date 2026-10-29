@@ -47,6 +47,9 @@
   - **macOS 快捷键**：⌘C/⌘V/⌘X 在跨源 iframe 内嵌时原生默认动作不会发生，插件拦截三键并经 `execCommand` 显式执行；仅 macOS + 被内嵌时启用。
 - **点击对话里的工作区文件/文件夹链接 → 在 VS Code 资源管理器中定位并打开（自动安装配套插件 `dsh-vscode-file-links`，v0.8.46 起）**：模型回答里的 `src/a.ts`、`docs/` 这类工作区相对路径链接，原本点击后会在 DSH 侧边栏打开；现在在面板内点击会改为在本窗口的**资源管理器**中定位并打开（文件同时打开编辑器，文件夹仅定位）。**前提**：目标必须位于当前 VS Code 打开的工作区内且真实存在——不满足时自动回落到原来的 DSH 侧边栏行为，绝不出现「点了没反应」。详见下文专节。
 - **隐藏 DSH 左侧栏（v1.0.1 起）**：面板顶部工具条上的按钮可在「隐藏 / 显示 DSH 左侧栏」之间切换，窄面板（<1024px，如侧边栏、底部面板）默认隐藏，让对话区占满宽度；隐藏只靠父容器视口裁剪实现，**不往 DSH 页面里注入任何东西**。详见下文专节。
+- **官网 Windows 桌面版启动**：自动从注册表 / 常见默认目录定位桌面版内置 CLI，按 `dshPanel.dshCommand` → 桌面版 CLI → `npx` 的顺序启动，不需要 PATH / npm / Node；桌面版起的实例仍是 web profile，会话与凭据共享（同一个 `~/.dsh`）。
+- **Remote-SSH / Dev Containers 受管认证代理**：真远程下按「`dshPanel.url` 是否回环」判定代理可用，面板经 `asExternalUri` 转发加载；远程模式只放行已转发 authority 的请求，扩展自身请求带一次性密钥头。新增 `dshPanel.remoteAuthProxy`（默认 `true`），多用户共享服务器建议关闭。
+- **远端面板用本机浏览器登录 DeepSeek 账号（自动安装配套插件 `dsh-vscode-open-external`）**：接管 DSH 页面的 `window.open`，把授权链接交给 `vscode.env.openExternal` 在客户端（WSL/Remote 下即本机）浏览器打开；只转交 http(s) 链接，仅握手后接管，独立浏览器行为不变。新增 `dshPanel.installOpenExternalPlugin`（默认 `true`）可关闭。
 
 ### 使用示例：发送选中内容到对话框
 
@@ -72,11 +75,13 @@
 | `dshPanel.autoStart` | `true` | 未运行时是否自动启动 dsh |
 | `dshPanel.autoRegisterWorkspace` | `true` | 是否把当前工作区登记到 DSH 工作区列表（幂等；只登记，不改变 DSH 当前选中的工作区） |
 | `dshPanel.pinWorkspaceToVSCode` | `true` | 面板打开时把 DSH 当前工作区切到 VS Code 正在打开的文件夹（自动安装配套插件 `dsh-vscode-workspace`）；已在该工作区时不动，关闭后不安装插件、不切换 |
-| `dshPanel.autoInstallDsh` | `true` | 未安装 dsh 时是否提示并代为安装 |
-| `dshPanel.dshCommand` | `dsh` | dsh 命令（可填完整路径） |
+| `dshPanel.autoInstallDsh` | `true` | 检测到当前环境（含远程服务器）未安装 dsh 时，是否提示并代为安装（npm install -g @deepseek-ai/dsh）。注：官网 Windows 桌面版会被自动识别，不会走到这里 |
+| `dshPanel.dshCommand` | `dsh` | dsh 命令（默认从 PATH 解析；未找到时自动尝试官网 Windows 桌面版内置 CLI 与 npx。如需强制指定完整路径，例如 `C:\Users\you\AppData\Roaming\npm\dsh.cmd` 或 `<桌面版安装目录>\resources\runtime\cli\bin\dsh.cmd`） |
 | `dshPanel.killOnDispose` | `true` | 扩展停用时是否结束它启动的 dsh |
 | `dshPanel.openSystemBrowser` | `false` | 扩展启动 dsh 时是否保留弹系统浏览器的旧行为 |
 | `dshPanel.installClipboardPlugin` | `true` | 自动安装内置 `dsh-webview-clipboard` 插件（面板内复制按钮走宿主剪贴板；macOS 额外修复 ⌘C/⌘V/⌘X）。怀疑影响 dsh web 启动时可关闭对比；关闭后复制按钮恢复 DSH 原生行为 |
+| `dshPanel.installOpenExternalPlugin` | `true` | 自动安装内置 `dsh-vscode-open-external` 插件：面板内 `window.open`（典型：DeepSeek 账号登录授权页）改在本机系统浏览器打开，Remote-WSL / Remote-SSH 下由你的 Windows 浏览器打开 |
+| `dshPanel.remoteAuthProxy` | `true` | Remote-SSH / Dev Containers 等真远程窗口下是否启用受管认证代理（默认启用）；代理只监听服务器回环，多用户共享服务器建议关闭，关闭后面板会给出浏览器认证引导 |
 | `dshPanel.workspaceFileLinkAction` | `revealAndOpen` | 对话里工作区文件/文件夹链接的点击行为：`revealAndOpen` 资源管理器定位并打开 / `diffAndOpen` 定位 + 展示变更（并排 diff，见下节）/ `revealOnly` 仅定位 / `off` 不接管（保持 DSH 侧边栏打开，也不安装配套插件） |
 | `dshPanel.dshSidebar` | `auto` | DSH 左侧栏显示策略：`auto` 窄面板（<1024px）自动隐藏、宽面板显示 / `show` 始终显示（等同关闭本能力）/ `hide` 始终隐藏；顶部工具条可随时手动切换，修改本配置会清除手动切换 |
 
