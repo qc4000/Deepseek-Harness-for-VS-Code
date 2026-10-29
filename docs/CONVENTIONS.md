@@ -126,6 +126,30 @@
 - 一次提交只做一组相关改动；「顺手重构」单独提交，并在信息里说明 `chore:`。
 - 用户可见文案改动（README 配置表、错误提示）与代码同提交。
 
+### 9.1 同步上游原始仓库（fork 工作流）
+
+本仓库是 [Vithrive/Deepseek-Harness-for-VS-Code](https://github.com/Vithrive/Deepseek-Harness-for-VS-Code) 的
+fork，`origin` 指向自己的仓库。上游发布主线是 `main`（没有 `dev-1.0`）。**上游只提供提交内容，
+版本号与 tag 由本仓库独立维护**：
+
+- **fetch 加 `--no-tags`**：`git fetch --no-tags <upstream> main`（临时比较可 fetch 到
+  `refs/remotes/upstream-tmp/main`）。不加会把上游 tag 自动拉进本地命名空间。
+- **版本号不跟随**：合并时 `package.json` 的 `version` 保留本地值；上游 `CHANGELOG.md` 的版本
+  小节标题不进入本地（内容按分类并入本地下一版），README 里的「vX.Y.Z 起」改写成本地版本
+  或去掉版本引用。
+- **tag 不跟随**：不 push 上游 tag；本地发版只按本地提交打 `vX.Y.Z`。若上游 tag 已被 fetch
+  拉入（例如 `v1.1.0`），本地要发同名版本前必须先 `git tag -d <tag>` 再重打，绝不直接把
+  上游 tag 当作本地发布。
+- **冲突处理**：`package.json`（version / description）、`CHANGELOG.md`、`README.md` 以本地
+  版本线为准，上游功能说明并入本地小节；`extension.js` 逐块合并，保留本地能力并接入上游
+  新增逻辑——尤其检查握手 `ack` 字段、`webview` 中继消息分支、`__internals` 导出列表、
+  `ensureDshPlugins` 安装链。
+- **合并后必须验证**：`npm test` 全绿；`docs/TESTING.md` 测试地图与 CHANGELOG 里的套件/
+  断言数同步更新。
+- **合并提交信息**：`merge: 同步上游 main 的提交并保留本地版本线（v<本地版本>）`。
+- 不修改 `origin` 指向，不把上游 tag 推到 `origin`；上游仓库地址以 `package.json` 的
+  `repository` 字段为准。
+
 ## 10. 历史坑（回归清单）
 
 > 下面每一条都对应一次真实事故或线上故障。改到相关代码时，先看它，再动手。
