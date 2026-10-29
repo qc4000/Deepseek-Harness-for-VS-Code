@@ -194,7 +194,7 @@ profile 目录：`$DSH_HOME`（默认 `~/.dsh`）`/profiles/web`；插件写入
 | 插件 | 来源 | 版本 | 作用 |
 | --- | --- | --- | --- |
 | `dsh-drop-caret` | npm（`dsh plugin add` 优先，失败 `npm pack` 解压兜底） | ≥ 0.2.3 | 拖文件 / 选中内容插入对话框光标处 |
-| `dsh-webview-clipboard` | `clipboardPluginFiles()` 以源码字符串生成 | 0.2.1 | macOS 内嵌 iframe 下 ⌘C/⌘V/⌘X 失效修复（execCommand） |
+| `dsh-webview-clipboard` | `clipboardPluginFiles()` 以源码字符串生成 | 0.3.0 | 面板内复制按钮三级回退（原生 → 宿主 `vscode.env.clipboard` → `execCommand`，绕过 VS Code 跨源 iframe 权限限制）；macOS 额外修复 ⌘C/⌘V/⌘X |
 | `dsh-vscode-layout` | `bundledPluginFiles()` 读 `dsh-plugins/` 真实文件 | 0.1.1 | 只读上报 DSH 左侧栏宽度/折叠状态（供面板视口裁剪）；`dshPanel.dshSidebar=show` 时不安装 |
 | `dsh-vscode-file-links` | `dsh-plugins/` 真实文件随扩展分发 | 见插件 `package.json` | 工作区文件/文件夹链接改在 VS Code 资源管理器定位/打开 |
 | `dsh-vscode-changes` | `dsh-plugins/` 真实文件随扩展分发（**仅宿主半边**） | 见插件 `package.json` | 把「某会话某轮里某文件的两侧全文」出口成一条鉴权 GET 路由（`/api/dsh-vscode.changes-file`），供轮级 diff；仅 `workspaceFileLinkAction=diffAndOpen` 时安装 |

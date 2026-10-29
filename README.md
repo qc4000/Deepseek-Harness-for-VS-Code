@@ -42,7 +42,9 @@
 - **远程支持**：Remote-SSH / Dev Containers 下运行于服务器端，自动检测安装服务器端 dsh、经端口转发把面板接入本地 VS Code；
 - 面板按钮：刷新（不打断运行中的任务）/ 重启 dsh web / 在浏览器中打开；字号跟随 `editor.fontSize` 等比缩放（CSS zoom 实现，非整数倍缩放同样清晰）；
 - **发送选中内容 / 拖放文件到 DSH 对话框**（自动安装配套插件 `dsh-drop-caret`）：把文件、文件夹、代码段以 `路径:行号` 引用精确插入对话框光标处——**从 VS Code 资源管理器拖拽直接引用源文件本身**（不产生副本）；从系统文件管理器拖入时浏览器无法取得真实路径，此时才回退为工作区 `.dsh-drop/` 下的内容快照。点击 DSH 对话中的外链在系统浏览器打开（配合 DSH 插件 `dsh-open-links`）。
-- **macOS 剪贴板快捷键修复（自动安装配套插件 `dsh-webview-clipboard`）**：修复 macOS 上面板内 ⌘C/⌘V/⌘X 失效的问题——DSH 页面以跨源 iframe 内嵌于 webview 时，浏览器的原生剪贴板默认动作不会发生。插件注入 DSH 页面后拦截这三个键并经 execCommand 显式执行。仅 macOS + 被内嵌时启用，其余环境行为不变。
+- **面板内剪贴板修复（自动安装配套插件 `dsh-webview-clipboard`；v1.0.6 起覆盖复制按钮）**：
+  - **复制按钮（全平台）**：DSH 代码块 / 消息上的「复制」走 `navigator.clipboard.writeText`，而 VS Code 的权限策略会拒绝 webview 内层跨源 iframe（[microsoft/vscode#182642](https://github.com/microsoft/vscode/issues/182642)），按钮直接失败且 DSH 不会回退。插件改为「原生 → 宿主 `vscode.env.clipboard` → `execCommand`」三级回退；仅面板内嵌时接管，系统浏览器直接打开 DSH 行为不变。
+  - **macOS 快捷键**：⌘C/⌘V/⌘X 在跨源 iframe 内嵌时原生默认动作不会发生，插件拦截三键并经 `execCommand` 显式执行；仅 macOS + 被内嵌时启用。
 - **点击对话里的工作区文件/文件夹链接 → 在 VS Code 资源管理器中定位并打开（自动安装配套插件 `dsh-vscode-file-links`，v0.8.46 起）**：模型回答里的 `src/a.ts`、`docs/` 这类工作区相对路径链接，原本点击后会在 DSH 侧边栏打开；现在在面板内点击会改为在本窗口的**资源管理器**中定位并打开（文件同时打开编辑器，文件夹仅定位）。**前提**：目标必须位于当前 VS Code 打开的工作区内且真实存在——不满足时自动回落到原来的 DSH 侧边栏行为，绝不出现「点了没反应」。详见下文专节。
 - **隐藏 DSH 左侧栏（v1.0.1 起）**：面板顶部工具条上的按钮可在「隐藏 / 显示 DSH 左侧栏」之间切换，窄面板（<1024px，如侧边栏、底部面板）默认隐藏，让对话区占满宽度；隐藏只靠父容器视口裁剪实现，**不往 DSH 页面里注入任何东西**。详见下文专节。
 
@@ -74,7 +76,7 @@
 | `dshPanel.dshCommand` | `dsh` | dsh 命令（可填完整路径） |
 | `dshPanel.killOnDispose` | `true` | 扩展停用时是否结束它启动的 dsh |
 | `dshPanel.openSystemBrowser` | `false` | 扩展启动 dsh 时是否保留弹系统浏览器的旧行为 |
-| `dshPanel.installClipboardPlugin` | `true` | 自动安装内置 `dsh-webview-clipboard` 插件（修复 macOS 面板内编辑快捷键；Windows/Linux 上为惰性文件不影响行为）。怀疑影响 dsh web 启动时可关闭对比 |
+| `dshPanel.installClipboardPlugin` | `true` | 自动安装内置 `dsh-webview-clipboard` 插件（面板内复制按钮走宿主剪贴板；macOS 额外修复 ⌘C/⌘V/⌘X）。怀疑影响 dsh web 启动时可关闭对比；关闭后复制按钮恢复 DSH 原生行为 |
 | `dshPanel.workspaceFileLinkAction` | `revealAndOpen` | 对话里工作区文件/文件夹链接的点击行为：`revealAndOpen` 资源管理器定位并打开 / `diffAndOpen` 定位 + 展示变更（并排 diff，见下节）/ `revealOnly` 仅定位 / `off` 不接管（保持 DSH 侧边栏打开，也不安装配套插件） |
 | `dshPanel.dshSidebar` | `auto` | DSH 左侧栏显示策略：`auto` 窄面板（<1024px）自动隐藏、宽面板显示 / `show` 始终显示（等同关闭本能力）/ `hide` 始终隐藏；顶部工具条可随时手动切换，修改本配置会清除手动切换 |
 

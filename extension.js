@@ -1637,6 +1637,10 @@ ${sidebarToolbarHtml}
   // 新字段误判，从而丢掉 diff 模式）。
   var WS_PIN_ID = ${jsonForScript(WORKSPACE_PLUGIN_SOURCE)};
   var workspacePinPath = ${jsonForScript(pinPath)};
+  // 复制按钮回退：剪贴板写入请求从页面内插件转给扩展宿主（VS Code 权限策略
+  // 拒绝内层跨源 iframe 的 navigator.clipboard，见 microsoft/vscode#182642）。
+  var CLIPBOARD_ID = ${jsonForScript(CLIPBOARD_PLUGIN_NAME)};
+  var CLIPBOARD_MAX = ${CLIPBOARD_MAX_TEXT};
   var PIN_TIMEOUT_MS = ${WORKSPACE_PIN_TIMEOUT_MS};
   var PIN_REASON_MAX = ${WORKSPACE_PIN_REASON_MAX};
   // 侧栏策略：override（用户手动）> policy（配置）> 宽度自适应（与 DSH 的 1024 断点一致）。
@@ -1869,6 +1873,20 @@ ${sidebarToolbarHtml}
       applyLayout();
       return;
     }
+    if (data.source === CLIPBOARD_ID) {
+      // 只认本面板 iframe + DSH origin；非法字段整条丢弃，超长直接回失败。
+      if (!fromOurFrame(event)) return;
+      if (data.type === 'clipboard-write' && typeof data.token === 'string') {
+        var clipToken = data.token.slice(0, 64);
+        if (typeof data.text === 'string' && data.text.length <= CLIPBOARD_MAX) {
+          vscode.postMessage({ type: 'dsh-clipboard-write', token: clipToken, text: data.text });
+        } else {
+          // 不截断（避免复制半截）：回失败让插件走 execCommand 兜底。
+          postToFrame({ source: HOST_ID, type: 'clipboard-result', token: clipToken, ok: false });
+        }
+      }
+      return;
+    }
     if (data.type === 'dsh-reveal-accepted' && typeof data.token === 'string') {
       // 扩展宿主已接单（轮级取数可能较慢）：通知页面把这次等待放宽，避免超时
       // 回放导致「diff 与 DSH 侧栏同时打开」。
@@ -1878,6 +1896,11 @@ ${sidebarToolbarHtml}
     if (data.type === 'dsh-reveal-result' && typeof data.token === 'string') {
       // 扩展宿主的处理结果：转发回 DSH 页面，由插件决定是否回放原始点击。
       postToFrame({ source: HOST_ID, type: 'reveal-result', token: data.token, ok: data.ok === true });
+      return;
+    }
+    if (data.type === 'dsh-clipboard-result' && typeof data.token === 'string') {
+      // 宿主写剪贴板的结果：回传给页面内插件，决定 resolve 还是走 execCommand 兜底。
+      postToFrame({ source: HOST_ID, type: 'clipboard-result', token: data.token.slice(0, 64), ok: data.ok === true });
       return;
     }
     if (data.type === 'dsh-font-scale' && typeof data.scale === 'number') {
@@ -1948,9 +1971,17 @@ const DSH_PLUGIN_NAME = 'dsh-drop-caret';
 const DSH_PLUGIN_MIN = '0.2.3';
 const NPMJS_REGISTRY = 'https://registry.npmjs.org/';
 // 内置分发的兼容插件（随扩展文件直接写入 DSH web profile，不经 npm）：
-// 修复 macOS 上 DSH 页面被本扩展以跨源 iframe 内嵌时 ⌘C/⌘V/⌘X 失效的问题。
+// - macOS 上 DSH 页面被本扩展以跨源 iframe 内嵌时 ⌘C/⌘V/⌘X 失效；
+// - 所有平台上 DSH 的「复制」按钮走 navigator.clipboard.writeText，而 VS Code
+//   的权限策略拒绝内层跨源 iframe（microsoft/vscode#182642），按钮直接失败。
+// 两件事都由插件在页面侧接管：快捷键改 execCommand，复制按钮改走宿主剪贴板。
 const CLIPBOARD_PLUGIN_NAME = 'dsh-webview-clipboard';
-const CLIPBOARD_PLUGIN_VERSION = '0.2.1';
+// 0.3.0：新增复制按钮回退（原生 → 宿主 vscode.env.clipboard → execCommand）。
+const CLIPBOARD_PLUGIN_VERSION = '0.3.0';
+// 复制文本上限：与 diff 单侧上限同量级；超限不截断（避免复制半截），直接回失败。
+const CLIPBOARD_MAX_TEXT = 1024 * 1024;
+// 插件等宿主回执的上限；超时后走 execCommand 兜底（兼容旧版扩展）。
+const CLIPBOARD_TIMEOUT_MS = 1500;
 // 内置分发的工作区文件链接插件（源码在 dsh-plugins/ 目录，随扩展文件直接写入
 // DSH web profile，不经 npm）：点对话里的工作区文件/文件夹链接时，改为在本窗口的
 // VS Code 资源管理器中定位并打开。
@@ -2013,6 +2044,8 @@ let sidebarUnavailableNotified = false;
 /** 工作区跟随的失败提示（插件未生效 / 旧版不支持 / 切换失败）各只提醒一次。 */
 let workspacePinUnavailableNotified = false;
 let workspacePinFailureNotified = false;
+/** 复制失败的提示是否已弹过（每窗口只提醒一次，避免连续复制刷屏）。 */
+let clipboardFailureNotified = false;
 let dshModelDriftChecked = false;
 
 function dshHomeDir() {
@@ -2213,6 +2246,10 @@ export function apply(_ctx) {}
 // 修复：拦截这三个键，preventDefault 后改用 document.execCommand 显式执行。
 // 其余编辑快捷键原生可用，不做处理，避免与编辑器自身实现冲突。
 // 仅在「被 Electron 内嵌 + macOS」时启用，其余环境行为不变。
+//
+// 全平台：DSH 的「复制」按钮走 navigator.clipboard.writeText，VS Code 权限策略
+// 会拒绝内层跨源 iframe（microsoft/vscode#182642），按钮直接报失败且不回退。
+// 这里包一层 writeText：原生 → 宿主 vscode.env.clipboard → textarea+execCommand。
 
 window.__ModuleLoader__.load({ id: '${CLIPBOARD_PLUGIN_NAME}', factory: (require) => {
   var module = { exports: {} }
@@ -2273,11 +2310,128 @@ window.__ModuleLoader__.load({ id: '${CLIPBOARD_PLUGIN_NAME}', factory: (require
     }
   }
 
+  // ── 复制按钮回退（spec 007）───────────────────────────────────────────
+  var HOST_ID = 'dsh-vscode-host'
+  var SOURCE_ID = '${CLIPBOARD_PLUGIN_NAME}'
+  var HOST_TIMEOUT_MS = ${CLIPBOARD_TIMEOUT_MS}
+  var pending = Object.create(null)   // 无原型：回执 token 不会污染 Object.prototype
+  var copySeq = 0
+  var nativeWrite = null
+  var clipboardRef = null
+  var copyInstalled = false
+
+  function makeToken() {
+    copySeq += 1
+    return 'c' + copySeq + '-' + Date.now()
+  }
+
+  /** 结算一次宿主写入；未知 token 直接忽略（页面伪造回执不能误伤其它请求）。 */
+  function settleCopy(token, ok) {
+    var entry = pending[token]
+    if (!entry) return
+    delete pending[token]
+    try { clearTimeout(entry.timer) } catch (e) { /* ignore */ }
+    if (ok) entry.resolve()
+    else entry.reject(new Error('clipboard write failed'))
+  }
+
+  /** 经外层 webview 让扩展宿主用 vscode.env.clipboard.writeText 写入。 */
+  function writeViaHost(text) {
+    return new Promise(function (resolve, reject) {
+      var token = makeToken()
+      pending[token] = {
+        resolve: resolve,
+        reject: reject,
+        timer: setTimeout(function () { settleCopy(token, false) }, HOST_TIMEOUT_MS)
+      }
+      try {
+        // targetOrigin 用 '*'：插件不知道 webview 的 vscode-webview:// origin；
+        // 外层只接受本 iframe + DSH origin 的消息（fromOurFrame 双校验）。
+        window.parent.postMessage({ source: SOURCE_ID, type: 'clipboard-write', token: token, text: text }, '*')
+      } catch (e) {
+        settleCopy(token, false)
+      }
+    })
+  }
+
+  /** 兜底：textarea + execCommand（旧宿主不认识 clipboard-write 时仍能复制）。 */
+  function execCopy(text) {
+    if (typeof document === 'undefined' || typeof document.execCommand !== 'function') return false
+    var area = document.createElement('textarea')
+    if (!area) return false
+    var body = document.body
+    var ok = false
+    area.value = text
+    area.setAttribute('readonly', '')
+    area.style.position = 'fixed'
+    area.style.left = '-9999px'
+    area.style.top = '0'
+    if (body && typeof body.appendChild === 'function') body.appendChild(area)
+    try {
+      if (typeof area.select === 'function') area.select()
+      if (typeof area.setSelectionRange === 'function') area.setSelectionRange(0, text.length)
+      ok = document.execCommand('copy') === true
+    } catch (e) {
+      ok = false
+    } finally {
+      if (area.parentNode && typeof area.parentNode.removeChild === 'function') area.parentNode.removeChild(area)
+    }
+    return ok
+  }
+
+  /** 包装后的 writeText：保持 Promise 语义；三层都失败才 reject。 */
+  function writeText(text) {
+    var value = text == null ? '' : String(text)
+    var first
+    if (nativeWrite) {
+      try {
+        first = Promise.resolve(nativeWrite.call(clipboardRef, value)).then(function () { return true }, function () { return false })
+      } catch (e) {
+        first = Promise.resolve(false)
+      }
+    } else {
+      first = Promise.resolve(false)
+    }
+    return first.then(function (okFlag) {
+      if (okFlag) return
+      return writeViaHost(value).catch(function () {
+        if (execCopy(value)) return
+        throw new Error('clipboard write failed')
+      })
+    })
+  }
+
+  function onHostMessage(e) {
+    var data = e && e.data
+    if (!data || data.source !== HOST_ID || data.type !== 'clipboard-result') return
+    if (typeof data.token !== 'string') return
+    settleCopy(data.token, data.ok === true)
+  }
+
+  /** 只在被宿主 iframe 内嵌时接管；系统浏览器直开 DSH 行为不变。 */
+  function installCopyFallback() {
+    if (copyInstalled || !inIframe()) return
+    var clip = null
+    try { clip = navigator.clipboard } catch (e) { clip = null }
+    if (!clip || typeof clip.writeText !== 'function') return
+    clipboardRef = clip
+    nativeWrite = clip.writeText
+    try {
+      clip.writeText = writeText
+    } catch (e) {
+      return   // 只读属性：放弃接管，保留原生行为
+    }
+    copyInstalled = true
+    window.addEventListener('message', onHostMessage, false)
+  }
+
   function apply() {
+    installCopyFallback()
     window.addEventListener('keydown', onKeyDown, false)
     window.__dshWebviewClipboard = {
       version: PLUGIN_VERSION,
       enabled: enabled(),
+      copyFallback: copyInstalled,
       mac: isMac(),
       electron: inElectron()
     }
@@ -2462,6 +2616,15 @@ function shouldInstallLayoutPlugin() {
 }
 
 /**
+ * 是否安装内置剪贴板插件（`dshPanel.installClipboardPlugin`，默认开）。
+ * 关闭后不写插件文件，复制按钮恢复 DSH 原生行为（spec 007 AC-4）。
+ * @returns {boolean}
+ */
+function shouldInstallClipboardPlugin() {
+  return cfg().get('dshPanel.installClipboardPlugin', true) !== false;
+}
+
+/**
  * 确保 DSH web profile 已安装并声明 dsh-drop-caret 插件。
  * @returns {Promise<boolean>} 本次是否发生了新增/升级安装（true 时通常需重启 dsh web 生效）。
  */
@@ -2482,10 +2645,9 @@ async function ensureDshPlugins() {
       await ensureProfileDeclaration(profileDir, DSH_PLUGIN_NAME, `^${DSH_PLUGIN_MIN}`);
       changed = true;
     }
-    // 内置剪贴板兼容插件（文件随扩展直接写入，不走 npm）。
-    // 仅在 macOS 的 VS Code webview 内嵌场景激活（DSH 页面本地判定），
-    // Windows/Linux 上为惰性文件；可经 dshPanel.installClipboardPlugin 关闭。
-    if (cfg().get('dshPanel.installClipboardPlugin', true)) {
+    // 内置剪贴板兼容插件（文件随扩展直接写入，不走 npm）：全平台接管复制按钮，
+    // macOS 额外修 ⌘C/⌘V/⌘X；可经 dshPanel.installClipboardPlugin 关闭。
+    if (shouldInstallClipboardPlugin()) {
       if (await ensureClipboardPlugin(profileDir)) {
         changed = true;
       }
@@ -3024,6 +3186,20 @@ async function revealWorkspaceTarget(msg, webview) {
 }
 
 /**
+ * 复制失败提示（每窗口一次）：DSH 的复制按钮失败时不会透出原因，宿主必须让用户看见。
+ * @param {string} [reason]
+ */
+function notifyClipboardFailure(reason) {
+  if (clipboardFailureNotified) return;
+  clipboardFailureNotified = true;
+  const detail = reason ? `（${reason}）` : '';
+  vscode.window.setStatusBarMessage(
+    `复制失败${detail}。可在编辑器里选中文本后按 Ctrl+C（⌘C）复制`,
+    8000
+  );
+}
+
+/**
  * 处理 webview 消息：DSH 页面内点击外部链接用系统浏览器打开；点击工作区文件链接在
  * VS Code 资源管理器中定位并打开；发送选中内容回执提示。
  * 侧边栏面板与编辑器标签页共用。
@@ -3035,6 +3211,29 @@ function handleWebviewMessage(msg, webview) {
     const u = msg.url;
     if (/^https?:\/\//i.test(u)) {
       vscode.env.openExternal(vscode.Uri.parse(u));
+    }
+  } else if (msg && msg.type === 'dsh-clipboard-write') {
+    // 面板内 DSH 的复制按钮：navigator.clipboard 被 VS Code 权限策略拒绝，
+    // 改由宿主写入系统剪贴板（spec 007）。文本只在内存中路过，不记录、不落盘。
+    const token = typeof msg.token === 'string' ? msg.token.slice(0, 64) : '';
+    const reply = (ok) => {
+      if (webview && typeof webview.postMessage === 'function') {
+        try { webview.postMessage({ type: 'dsh-clipboard-result', token: token, ok: ok }); } catch { /* 面板已销毁 */ }
+      }
+    };
+    if (typeof msg.text !== 'string' || msg.text.length > CLIPBOARD_MAX_TEXT) {
+      reply(false);
+      notifyClipboardFailure('文本超出可复制范围');
+    } else if (!vscode.env || !vscode.env.clipboard || typeof vscode.env.clipboard.writeText !== 'function') {
+      reply(false);
+      notifyClipboardFailure('当前 VS Code 不支持剪贴板 API');
+    } else {
+      Promise.resolve()
+        .then(() => vscode.env.clipboard.writeText(msg.text))
+        .then(() => reply(true), (e) => {
+          reply(false);
+          notifyClipboardFailure(e && e.message ? e.message : '未知错误');
+        });
     }
   } else if (msg && msg.type === 'dsh-reveal-path') {
     const token = typeof msg.token === 'string' ? msg.token.slice(0, 64) : '';
@@ -5066,6 +5265,8 @@ module.exports.__internals = {
   startDshAndWaitReady,
   clipboardPluginFiles,
   CLIPBOARD_PLUGIN_NAME,
+  CLIPBOARD_MAX_TEXT,
+  CLIPBOARD_TIMEOUT_MS,
   fileLinkPluginFiles,
   fileLinkPluginVersion,
   ensureFileLinkPlugin,
@@ -5106,6 +5307,7 @@ module.exports.__internals = {
   sidebarPolicy,
   sidebarUiState,
   shouldInstallLayoutPlugin,
+  shouldInstallClipboardPlugin,
   buildIframeHtml,
   handleWebviewMessage,
   resolveWorkspaceTarget,

@@ -54,7 +54,8 @@ CI 只认退出码，不看输出格式。
 | 套件 | 断言 | 覆盖 |
 | --- | --- | --- |
 | `auth-proxy.test.js` | 21 | 令牌解析；裸地址 401 控制组；Cookie 换发与注入；dsh 重启后 401 自动重换；SSE 分块不被缓冲；WebSocket 升级透传；`localhost` 与 `127.0.0.1` 按 authority 独立换发 |
-| `clipboard-plugin.test.js` | 18 | 生成文件的语法真实通过；只拦 ⌘C/⌘V/⌘X（不拦 ⌘A/撤销/光标）；macOS + Electron + iframe 三重门控；不写 `dependencies`；`cordis.patch.yml` 结构 |
+| `clipboard-bridge.test.js` | 16 | 复制按钮回退（007）的中继与宿主：合法 `clipboard-write` 转发、origin/source 双校验、超长不转发并回 `ok:false`、宿主回执回传 iframe、`vscode.env.clipboard.writeText` 成功/失败回执、失败提示只一次 |
+| `clipboard-plugin.test.js` | 42 | 生成文件的语法真实通过；只拦 ⌘C/⌘V/⌘X（不拦 ⌘A/撤销/光标）；macOS + Electron + iframe 三重门控；不写 `dependencies`；`cordis.patch.yml` 结构；复制按钮三级回退（原生成功不发消息、原生被拒走宿主、无回执/`ok:false` 时 `execCommand` 兜底、非 iframe 不接管、未知 token 忽略）；配置开关与“不拦 click/不碰 readText”约束 |
 | `command-execution.test.js` | 5 | `runCommandOk`/`runCommandOutput` 真实命令成功与失败；元字符注入拒绝；POSIX 无 shell / Windows 引号路径两条执行路径 |
 | `config-sanitize.test.js` | 14 | `getHost` 白名单与回退；`getPort` 整数/范围；`sanitizeCommand` 拒绝 `& \| < > ^ % ! " \` ;` 与换行；合法带空格路径保留 |
 | `dsh-changes-plugin.test.js` | 45 | `dsh-vscode-changes` 宿主插件（按真机契约重写）：包声明/语法/不写 dependencies；路由参数校验（缺参/越界/超长）；公开钩子自捕获两侧全文（`fs/write-intent` **与** `fs/edit-intent` + `turn/end`）：同轮多次编辑合并为一条净变更、write+edit 混用仍一条、跨轮互不累积、改回原样不列出、新增/删除文件两侧 absent；`summary()` 权威清单匹配（未记录路径不读盘）；shell 直接改动 `no-text`；会话释放 `released` / 轮无记录 `no-record` / 服务形状不符 `unavailable` 三种 404；二进制与超大；同轮取最新事件 |
