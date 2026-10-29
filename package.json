@@ -88,6 +88,27 @@
           "default": true,
           "description": "自动安装内置 dsh-vscode-open-external 插件（v1.1.0 起）：面板内 DSH 页面里的 window.open（典型：DeepSeek 账号登录的授权页）改为在本机系统浏览器打开——Remote-SSH / Remote-WSL 场景下由客户端（如 Windows）浏览器打开，解决远端没有图形浏览器时无法登录的问题"
         },
+        "dshPanel.forwardVSCodeKeys": {
+          "type": "boolean",
+          "default": true,
+          "description": "面板内焦点时是否转发 VS Code 快捷键（自动安装配套插件 dsh-vscode-keys）。转发前会先查 DSH 自己的键位表，命中即让位给 DSH，不会抢 DSH 的快捷键。关闭后行为与该能力不存在时完全一致（不安装插件、不监听按键）。"
+        },
+        "dshPanel.forwardKeybindings": {
+          "type": "object",
+          "default": {},
+          "additionalProperties": {
+            "type": [
+              "string",
+              "boolean"
+            ]
+          },
+          "markdownDescription": "在默认转发表之上增删按键：值写命令 id 表示转发到该命令，写 `false` 表示永不拦截。\n\n键名必须是「修饰键 + 主键」：`mod`（macOS 为 ⌘，其它平台为 Ctrl）、`ctrl`、`meta`、`alt`、`shift`，主键可用字母、数字、`f1`–`f24` 或 code 名（如 `backquote`、`comma`）。\n\n不支持两段式（如 `ctrl+k ctrl+s`）；无修饰键的单键也不会被拦截（会破坏输入框）。\n\n例：`{ \"ctrl+shift+y\": \"workbench.action.togglePanel\", \"ctrl+shift+f\": false }`"
+        },
+        "dshPanel.focusReleaseKey": {
+          "type": "string",
+          "default": "F6",
+          "markdownDescription": "面板内把焦点交还 VS Code 的按键（默认 `F6`）。按下后焦点离开 DSH 页面，之后可以使用任意自定义键位与两段式快捷键；按完回到 DSH 请点击面板。置空字符串可关闭该行为（不影响快捷键转发）。"
+        },
         "dshPanel.workspaceFileLinkAction": {
           "type": "string",
           "default": "revealAndOpen",
@@ -238,6 +259,10 @@
       {
         "command": "dshPanel.chatStatus",
         "title": "DeepSeek Harness: 检查 DSH 状态"
+      },
+      {
+        "command": "dshPanel.keyStatus",
+        "title": "DeepSeek Harness: 查看快捷键转发"
       },
       {
         "command": "dshPanel.toggleDshSidebar",

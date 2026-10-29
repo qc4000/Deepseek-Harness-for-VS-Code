@@ -1,0 +1,39 @@
+{
+  "name": "dsh-vscode-keys",
+  "version": "0.2.1",
+  "description": "DeepSeek Harness 插件：DSH 页面被 VS Code 扩展 webview（跨源 iframe）内嵌时，把面板内按下的工作台级快捷键转发给宿主执行；命中 DSH 自己的键位则让位。由 Deepseek-Harness-for-VS-Code 扩展内置分发。",
+  "keywords": [
+    "deepseek",
+    "harness",
+    "dsh",
+    "cordis",
+    "plugin",
+    "vscode",
+    "webview",
+    "keyboard",
+    "shortcut"
+  ],
+  "type": "module",
+  "main": "lib/index.js",
+  "exports": {
+    ".": "./lib/index.js",
+    "./client": "./lib/client.js",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib",
+    "cordis.patch.yml"
+  ],
+  "license": "MIT",
+  "dsh": {
+    "client": {
+      "inject": [
+        "@deepseek-ai/dsh-client-runtime"
+      ],
+      "platform": "web"
+    },
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  }
+}

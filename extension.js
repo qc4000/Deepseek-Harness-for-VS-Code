@@ -1831,6 +1831,9 @@ function buildIframeHtml(url, scale, requestedFileLinkMode, sidebar, pinPathRaw)
   const sidebarChrome = sidebarPolicyValue !== 'show' || sidebarOverrideValue !== null;
   // 要钉住的 DSH 工作区路径（空串 = 不下发：开关关闭 / 空窗口 / 路径不可用）。
   const pinPath = typeof pinPathRaw === 'string' && isValidWorkspacePinPath(pinPathRaw) ? pinPathRaw : '';
+  // 快捷键转发：宿主把生效表编译成「物理键签名 → true」下发；页面只查表，
+  // 命中后再按 DSH 的键位目录决定是否让位（DSH 优先）。关闭时下发空表 + 不回 ack。
+  const keys = forwardKeysState();
   const sidebarToolbarHtml = sidebarChrome
     ? '<div id="dsh-toolbar"><button id="dsh-sidebar-toggle" type="button" aria-label="隐藏 DSH 侧栏" title="隐藏 DSH 侧栏" data-hidden="false">'
       + '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1" aria-hidden="true">'
@@ -1860,13 +1863,15 @@ function buildIframeHtml(url, scale, requestedFileLinkMode, sidebar, pinPathRaw)
   #dsh-sidebar-toggle svg { width: 14px; height: 14px; display: block; }
   /* 裁剪层不参与缩放：--dsh-crop 即视觉像素，与 iframe 上的 zoom 解耦。 */
   #dsh-stage { position: relative; flex: 1 1 auto; min-height: 0; overflow: hidden; }
+  /* 焦点交还后的落点：不画焦点框，但能接住键盘（否则字母会落进编辑器）。 */
+  #dsh-stage:focus { outline: none; }
   #dsh-clip { position: absolute; top: 0; bottom: 0; left: calc(-1 * var(--dsh-crop, 0px)); width: calc(100% + var(--dsh-crop, 0px)); }
   #dsh-frame { width: 100%; height: 100%; border: none; display: block; zoom: ${s}; }
 </style>
 </head>
 <body>
 ${sidebarToolbarHtml}
-<div id="dsh-stage">
+<div id="dsh-stage" tabindex="-1">
 <div id="dsh-clip">
 <iframe id="dsh-frame" name="${VSCODE_HOST_ID}" src="${escapeHtml(url)}"
         style="width:100%;height:100%;border:none;display:block;zoom:${s};"
@@ -1898,6 +1903,12 @@ ${sidebarToolbarHtml}
   // 拒绝内层跨源 iframe 的 navigator.clipboard，见 microsoft/vscode#182642）。
   var CLIPBOARD_ID = ${jsonForScript(CLIPBOARD_PLUGIN_NAME)};
   var CLIPBOARD_MAX = ${CLIPBOARD_MAX_TEXT};
+  // 快捷键转发（spec 008）：表由宿主下发生成，页面只做签名命中；
+  // 命令 id 不在页面里出现，页面无法要求宿主执行任意命令。
+  var KEYS_ID = ${jsonForScript(KEYS_PLUGIN_SOURCE)};
+  var keysEnabled = ${jsonForScript(keys.enabled)};
+  var keysTable = ${jsonForScript(keys.table)};
+  var keysRelease = ${jsonForScript(keys.releaseKey)};
   var PIN_TIMEOUT_MS = ${WORKSPACE_PIN_TIMEOUT_MS};
   var PIN_REASON_MAX = ${WORKSPACE_PIN_REASON_MAX};
   // 侧栏策略：override（用户手动）> policy（配置）> 宽度自适应（与 DSH 的 1024 断点一致）。
@@ -1926,6 +1937,51 @@ ${sidebarToolbarHtml}
     var w = frameWindow();
     if (!w) return;
     try { w.postMessage(payload, FRAME_ORIGIN); } catch (e) { /* 页面正在切换：忽略 */ }
+  }
+
+  /**
+   * 页面发来的物理键事实：字段白名单 + 类型校验。多一个字段就整条丢弃——
+   * 防止页面篡改后塞入命令 id 让宿主执行任意命令。
+   */
+  function normalizeGesture(raw) {
+    if (!raw || typeof raw !== 'object') return null;
+    var allowed = { code: 1, ctrl: 1, meta: 1, alt: 1, shift: 1 };
+    for (var name in raw) {
+      if (Object.prototype.hasOwnProperty.call(raw, name) && !allowed[name]) return null;
+    }
+    if (typeof raw.code !== 'string' || !/^[A-Za-z][A-Za-z0-9]{0,15}$/.test(raw.code)) return null;
+    var flags = ['ctrl', 'meta', 'alt', 'shift'];
+    for (var i = 0; i < flags.length; i++) {
+      if (typeof raw[flags[i]] !== 'boolean') return null;
+    }
+    return { code: raw.code, ctrl: raw.ctrl, meta: raw.meta, alt: raw.alt, shift: raw.shift };
+  }
+
+  /** 页面回报的运行状态：只保留白名单字段（签名 + DSH 命令 id）。 */
+  function normalizeKeysReport(raw) {
+    var out = { type: 'dsh-keys-status', degraded: raw.degraded === true, shadowed: [] };
+    var rows = Array.isArray(raw.shadowed) ? raw.shadowed : [];
+    for (var i = 0; i < rows.length && out.shadowed.length < 32; i++) {
+      var row = rows[i];
+      if (!row || typeof row.sig !== 'string'
+          || !/^[A-Za-z][A-Za-z0-9]{0,15}\\|[01]\\|[01]\\|[01]\\|[01]$/.test(row.sig)) continue;
+      var command = typeof row.command === 'string' && /^[a-z][a-zA-Z0-9_.\\-]*$/.test(row.command)
+        ? row.command.slice(0, 128) : '';
+      out.shadowed.push({ sig: row.sig, command: command });
+    }
+    return out;
+  }
+
+  /**
+   * 焦点交还：先把焦点移出 iframe，再落到本页 stage（webview 文档）。
+   * 不能合成按键（isTrusted=false），只能真的把焦点交出去。
+   */
+  function releaseFocus() {
+    try { if (frame && typeof frame.blur === 'function') frame.blur(); } catch (e) { /* ignore */ }
+    try {
+      var host = document.getElementById('dsh-stage');
+      if (host && typeof host.focus === 'function') host.focus();
+    } catch (e2) { /* ignore */ }
   }
 
 
@@ -2168,6 +2224,30 @@ ${sidebarToolbarHtml}
       }
       return;
     }
+    if (data.source === KEYS_ID) {
+      // 面板内快捷键转发：只认本面板 iframe + DSH origin；开关关闭时完全不理会。
+      if (!fromOurFrame(event)) return;
+      if (!keysEnabled) return;
+      if (data.type === 'hello') {
+        postToFrame({ source: HOST_ID, type: 'keys-ack', table: keysTable, releaseKey: keysRelease });
+        return;
+      }
+      if (data.type === 'key') {
+        var gesture = normalizeGesture(data.gesture);
+        if (!gesture) return;
+        vscode.postMessage({ type: 'dsh-forwarded-key', gesture: gesture });
+        return;
+      }
+      if (data.type === 'focus-release') {
+        releaseFocus();
+        vscode.postMessage({ type: 'dsh-focus-released' });
+        return;
+      }
+      if (data.type === 'keys-status') {
+        vscode.postMessage(normalizeKeysReport(data));
+      }
+      return;
+    }
     if (data.type === 'dsh-reveal-accepted' && typeof data.token === 'string') {
       // 扩展宿主已接单（轮级取数可能较慢）：通知页面把这次等待放宽，避免超时
       // 回放导致「diff 与 DSH 侧栏同时打开」。
@@ -2212,6 +2292,14 @@ ${sidebarToolbarHtml}
     } else if (data.type === 'dsh-sidebar-toggle') {
       // 宿主命令 / 快捷键：与点按钮等价（同样算用户意图，需要持久化）。
       setHidden(!hidden, 'user');
+    } else if (data.type === 'dsh-keys-config') {
+      // 配置热更新：换表并重发 keys-ack，不重载 iframe（DSH 对话与输入不丢）。
+      keysEnabled = data.enabled === true;
+      keysTable = data.table && typeof data.table === 'object' ? data.table : {};
+      keysRelease = typeof data.releaseKey === 'string' && data.releaseKey !== '' ? data.releaseKey : null;
+      if (keysEnabled) {
+        postToFrame({ source: HOST_ID, type: 'keys-ack', table: keysTable, releaseKey: keysRelease });
+      }
     } else if (data.type === 'dsh-sidebar-config') {
       // 配置变更（宿主已清除手动覆盖）：按新策略与当前宽度重新判定，不重载 iframe。
       sidebarPolicy = data.policy === 'hide' ? 'hide' : (data.policy === 'show' ? 'show' : 'auto');
@@ -2325,6 +2413,83 @@ const WORKSPACE_PIN_KEY = 'dshPanel.pinWorkspaceToVSCode';
 const WORKSPACE_PIN_TIMEOUT_MS = 8000;
 // 中继回传的结果原因上限（与插件侧一致），避免把整段堆栈塞进提示。
 const WORKSPACE_PIN_REASON_MAX = 200;
+// 内置快捷键转发插件（源码在 dsh-plugins/，随扩展直接写入 DSH web profile，不经 npm）：
+// 面板内按下的工作台级快捷键不会冒泡到 VS Code（跨源 iframe 只把 keydown 派发给自己的
+// document），由页面插件识别后经 webview 中继交给宿主 executeCommand 执行。
+const KEYS_PLUGIN_NAME = 'dsh-vscode-keys';
+const KEYS_PLUGIN_SOURCE = 'dsh-vscode-keys';
+// 总开关 / 逐键配置 / 焦点交还键（默认 F6：DSH 未占用，且与 VS Code「切到下一部分」语义一致）。
+const FORWARD_KEYS_KEY = 'dshPanel.forwardVSCodeKeys';
+const FORWARD_MAP_KEY = 'dshPanel.forwardKeybindings';
+const FOCUS_RELEASE_KEY = 'dshPanel.focusReleaseKey';
+const FOCUS_RELEASE_DEFAULT = 'F6';
+// 逐键配置的条数上限与组合串长度上限：防误填巨型对象 / 超长键名。
+const FORWARD_MAX_ENTRIES = 64;
+const COMBO_MAX_LENGTH = 64;
+// 命令 id 只做形状校验（不设白名单）：不传参，因此没有参数注入面。
+const FORWARD_COMMAND_ID = /^[a-z][a-zA-Z0-9_.-]*$/;
+// 物理键签名：`<code>|<ctrl>|<meta>|<alt>|<shift>`，0/1 表示是否按下。
+// 页面插件与宿主必须用同一格式（dsh-vscode-keys 的 signatureOf 与这里逐字一致）。
+const GESTURE_SIGNATURE = /^[A-Za-z][A-Za-z0-9]{0,15}\|[01]\|[01]\|[01]\|[01]$/;
+// 默认转发表：只放「工作台级」命令。编辑器级命令（撤销/注释/移动行…）一律不放，
+// 否则会把焦点抢去编辑器。DSH 已占用的组合不会被抢：页面侧按 DSH 的键位目录逐键让位。
+const DEFAULT_FORWARD_KEYS = [
+  // 第一批：命令面板 / 快速打开 / 资源管理器 / 侧栏开关
+  { combo: 'mod+shift+p', command: 'workbench.action.showCommands' },
+  { combo: 'mod+p', command: 'workbench.action.quickOpen' },
+  { combo: 'mod+shift+e', command: 'workbench.view.explorer' },
+  { combo: 'mod+b', command: 'workbench.action.toggleSidebarVisibility' },
+  // 第二批：面板 / 源代码管理 / 扩展 / 调试 / 设置 / 全局搜索 / 终端 / 打开文件 / F1
+  { combo: 'mod+j', command: 'workbench.action.togglePanel' },
+  { combo: 'mod+shift+g', command: 'workbench.view.scm' },
+  { combo: 'mod+shift+x', command: 'workbench.view.extensions' },
+  { combo: 'mod+shift+d', command: 'workbench.view.debug' },
+  { combo: 'mod+,', command: 'workbench.action.openSettings' },
+  { combo: 'mod+shift+f', command: 'workbench.action.findInFiles' },
+  { combo: 'mod+`', command: 'workbench.action.terminal.toggleTerminal' },
+  { combo: 'mod+o', command: 'workbench.action.files.openFile' },
+  { combo: 'f1', command: 'workbench.action.showCommands' }
+];
+// 组合键里的主键 → DOM e.code（字母/数字/F1-F24 另行展开）。写 code 名比写符号更稳。
+const FORWARD_KEY_CODES = {
+  backquote: 'Backquote',
+  '`': 'Backquote',
+  minus: 'Minus',
+  '-': 'Minus',
+  equal: 'Equal',
+  '=': 'Equal',
+  comma: 'Comma',
+  ',': 'Comma',
+  period: 'Period',
+  '.': 'Period',
+  slash: 'Slash',
+  '/': 'Slash',
+  backslash: 'Backslash',
+  '\\': 'Backslash',
+  semicolon: 'Semicolon',
+  ';': 'Semicolon',
+  quote: 'Quote',
+  "'": 'Quote',
+  bracketleft: 'BracketLeft',
+  '[': 'BracketLeft',
+  bracketright: 'BracketRight',
+  ']': 'BracketRight',
+  enter: 'Enter',
+  escape: 'Escape',
+  esc: 'Escape',
+  tab: 'Tab',
+  space: 'Space',
+  arrowup: 'ArrowUp',
+  arrowdown: 'ArrowDown',
+  arrowleft: 'ArrowLeft',
+  arrowright: 'ArrowRight',
+  home: 'Home',
+  end: 'End',
+  pageup: 'PageUp',
+  pagedown: 'PageDown',
+  delete: 'Delete',
+  backspace: 'Backspace'
+};
 
 /** 测量不可用的提示是否已弹过（每窗口只提醒一次）。 */
 let sidebarUnavailableNotified = false;
@@ -2333,6 +2498,17 @@ let workspacePinUnavailableNotified = false;
 let workspacePinFailureNotified = false;
 /** 复制失败的提示是否已弹过（每窗口只提醒一次，避免连续复制刷屏）。 */
 let clipboardFailureNotified = false;
+/** 快捷键转发的提示状态（每类只提醒一次，避免刷屏）。 */
+let keysInvalidNotified = false;
+let releaseKeyInvalidNotified = false;
+let releaseKeyConflictNotified = false;
+let focusReleasedNotified = false;
+let keysDegradedNotified = false;
+/** 单个命令 / 单个组合的失败提示只弹一次。 */
+const forwardFailureNotified = new Set();
+const forwardUnknownNotified = new Set();
+/** 页面回报的运行时状态（降级 / 让位清单），供 dshPanel.keyStatus 展示。 */
+let keysRuntimeStatus = null;
 let dshModelDriftChecked = false;
 
 function dshHomeDir() {
@@ -2965,6 +3141,485 @@ function shouldInstallClipboardPlugin() {
   return cfg().get('dshPanel.installClipboardPlugin', true) !== false;
 }
 
+// =====================================================================
+// 快捷键转发（spec 008）：面板内按下的工作台级快捷键转发给 VS Code
+// 架构原因：webview 只把「自身文档」的 keydown 回传 workbench；内层 DSH 是跨源
+// iframe，焦点在它里面时按键只派发给它自己的 document（microsoft/vscode#65452），
+// 因此任何 contributes.keybindings / when 都不生效。只能由页面内插件识别后转发。
+// 冲突策略：DSH 的快捷键目录是唯一真相——命中即让位，绝不抢 DSH 的键。
+// =====================================================================
+
+/** 状态栏提示（测试桩可能没有该 API，缺失时静默跳过）。 */
+function statusBarMsg(text, ms) {
+  try {
+    if (vscode.window && typeof vscode.window.setStatusBarMessage === 'function') {
+      vscode.window.setStatusBarMessage(text, ms || 8000);
+    }
+  } catch { /* 窗口已关闭：忽略 */ }
+}
+
+/** 是否启用快捷键转发（`dshPanel.forwardVSCodeKeys`，默认开）。 */
+function shouldForwardVSCodeKeys() {
+  return cfg().get(FORWARD_KEYS_KEY, true) !== false;
+}
+
+/** 组合键主键 → DOM e.code；无法识别返回 null。 */
+function keyToCode(key) {
+  if (typeof key !== 'string' || key === '') return null;
+  if (/^[a-z]$/.test(key)) return 'Key' + key.toUpperCase();
+  if (/^[0-9]$/.test(key)) return 'Digit' + key;
+  if (/^f([1-9]|1[0-9]|2[0-4])$/.test(key)) return key.toUpperCase();
+  return Object.prototype.hasOwnProperty.call(FORWARD_KEY_CODES, key) ? FORWARD_KEY_CODES[key] : null;
+}
+
+/** DOM e.code → 组合键主键（用于把签名还原成可读组合）。 */
+function codeToKey(code) {
+  let m = /^Key([A-Z])$/.exec(code);
+  if (m) return m[1].toLowerCase();
+  m = /^Digit([0-9])$/.exec(code);
+  if (m) return m[1];
+  m = /^F([0-9]{1,2})$/.exec(code);
+  if (m) return 'f' + m[1];
+  for (const token of Object.keys(FORWARD_KEY_CODES)) {
+    if (!/^[a-z]/.test(token)) continue;
+    if (FORWARD_KEY_CODES[token] === code) return token;
+  }
+  return null;
+}
+
+/**
+ * 解析单个组合键。返回规范化结果或 null（非法）。
+ * 规则：修饰键 + 一个主键；必须带修饰键（F1-F24 例外）；**不支持两段式（chord）**，
+ * 写成 `ctrl+k ctrl+s` 会因空格被判非法。
+ * @param {unknown} raw
+ * @param {string} platform process.platform
+ * @returns {{combo: string, code: string, ctrl: boolean, meta: boolean, alt: boolean, shift: boolean}|null}
+ */
+function parseCombo(raw, platform) {
+  if (typeof raw !== 'string') return null;
+  const text = raw.trim();
+  if (text === '' || text.length > COMBO_MAX_LENGTH) return null;
+  if (/\s/.test(text)) return null; // 两段式（chord）：不支持
+  const parts = text.toLowerCase().split('+');
+  const mods = { ctrl: false, meta: false, alt: false, shift: false };
+  let key = '';
+  for (const part of parts) {
+    if (part === '') return null;
+    if (part === 'mod' || part === 'primary') mods[platform === 'darwin' ? 'meta' : 'ctrl'] = true;
+    else if (part === 'ctrl' || part === 'control') mods.ctrl = true;
+    else if (part === 'meta' || part === 'cmd' || part === 'command' || part === 'super' || part === 'win') mods.meta = true;
+    else if (part === 'alt' || part === 'option' || part === 'opt') mods.alt = true;
+    else if (part === 'shift') mods.shift = true;
+    else if (key === '') key = part;
+    else return null; // 两个主键：不是我们能表达的组合
+  }
+  if (key === '') return null;
+  const code = keyToCode(key);
+  if (code === null) return null;
+  // 规范名：符号主键一律还原成 code 名（` → backquote），否则 `mod+`` 与
+  // `ctrl+backquote` 会被当成两个不同的键，禁用/覆盖就对不上。
+  const token = /^[a-z0-9]+$/.test(key) ? key : (codeToKey(code) || key);
+  // 无修饰键只允许功能键：否则会抢走 DSH 输入框的打字/编辑按键。
+  if (!mods.ctrl && !mods.meta && !mods.alt && !mods.shift && !/^f([1-9]|1[0-9]|2[0-4])$/.test(key)) return null;
+  const order = [];
+  if (mods.ctrl) order.push('ctrl');
+  if (mods.meta) order.push('meta');
+  if (mods.alt) order.push('alt');
+  if (mods.shift) order.push('shift');
+  order.push(token);
+  return {
+    combo: order.join('+'),
+    code,
+    ctrl: mods.ctrl,
+    meta: mods.meta,
+    alt: mods.alt,
+    shift: mods.shift
+  };
+}
+
+/** 组合键 → 规范化字符串（非法返回 null）。 */
+function normalizeCombo(raw, platform) {
+  const parsed = parseCombo(raw, platform);
+  return parsed ? parsed.combo : null;
+}
+
+/** 组合键 → 物理键 gesture。 */
+function comboToGesture(combo, platform) {
+  const parsed = parseCombo(combo, platform);
+  if (!parsed) return null;
+  return { code: parsed.code, ctrl: parsed.ctrl, meta: parsed.meta, alt: parsed.alt, shift: parsed.shift };
+}
+
+/** 物理键 → 签名（必须与 dsh-vscode-keys/lib/client.js 的 signatureOf 一致）。 */
+function gestureSignature(gesture) {
+  const g = gesture || {};
+  return String(g.code) + '|' + (g.ctrl ? 1 : 0) + '|' + (g.meta ? 1 : 0) + '|' + (g.alt ? 1 : 0) + '|' + (g.shift ? 1 : 0);
+}
+
+/** 签名 → 可读组合（无法还原返回空串）。 */
+function signatureToCombo(sig) {
+  if (typeof sig !== 'string' || !GESTURE_SIGNATURE.test(sig)) return '';
+  const parts = sig.split('|');
+  const key = codeToKey(parts[0]);
+  if (!key) return '';
+  const order = [];
+  if (parts[1] === '1') order.push('ctrl');
+  if (parts[2] === '1') order.push('meta');
+  if (parts[3] === '1') order.push('alt');
+  if (parts[4] === '1') order.push('shift');
+  order.push(key);
+  return order.join('+');
+}
+
+/**
+ * 逐条校验 `dshPanel.forwardKeybindings`。非法条目单独收集（供一次性提示），
+ * 其余条目照常生效——绝不因一条写错而让整张表失效。
+ * @param {unknown} raw
+ * @param {string} platform
+ * @returns {{entries: Array<{combo: string, command: string}>, disabled: string[], invalid: string[]}}
+ */
+function parseForwardKeybindings(raw, platform) {
+  const out = { entries: [], disabled: [], invalid: [] };
+  if (raw === undefined || raw === null) return out;
+  if (typeof raw !== 'object' || Array.isArray(raw)) {
+    out.invalid.push('（配置不是对象）');
+    return out;
+  }
+  let accepted = 0;
+  for (const key of Object.keys(raw)) {
+    // 原型链相关键一律拒绝（配置来自 JSON，但 Windows/多窗口场景下仍要防万一）。
+    if (key === '__proto__' || key === 'constructor' || key === 'prototype') {
+      out.invalid.push(key);
+      continue;
+    }
+    const parsed = parseCombo(key, platform);
+    if (!parsed) {
+      out.invalid.push(key);
+      continue;
+    }
+    if (accepted >= FORWARD_MAX_ENTRIES) {
+      out.invalid.push(key);
+      continue;
+    }
+    const value = raw[key];
+    if (value === false) {
+      out.disabled.push(parsed.combo);
+      accepted += 1;
+      continue;
+    }
+    // 只接受明确的命令 id：`true` 之类「自动解析」不在这里承诺（见 spec 008 非目标）。
+    if (typeof value === 'string' && value.length <= 128 && FORWARD_COMMAND_ID.test(value)) {
+      out.entries.push({ combo: parsed.combo, command: value });
+      accepted += 1;
+      continue;
+    }
+    out.invalid.push(key);
+  }
+  return out;
+}
+
+/**
+ * 合并默认表与用户配置，得到生效表。
+ * 优先级：用户配置（字符串覆盖 / false 禁用）> 默认表；DSH 占用另在页面侧判定（更高优先）。
+ * @param {string} platform
+ * @param {unknown} raw
+ * @returns {{active: Array<{combo: string, command: string, origin: 'default'|'config', gesture: object}>, disabled: string[], invalid: string[], table: Record<string, boolean>}}
+ */
+function buildForwardTable(platform, raw) {
+  const parsed = parseForwardKeybindings(raw, platform);
+  const byCombo = new Map();
+  for (const item of DEFAULT_FORWARD_KEYS) {
+    const g = parseCombo(item.combo, platform);
+    if (g) byCombo.set(g.combo, { combo: g.combo, command: item.command, origin: 'default', gesture: { code: g.code, ctrl: g.ctrl, meta: g.meta, alt: g.alt, shift: g.shift } });
+  }
+  for (const item of parsed.entries) {
+    const g = parseCombo(item.combo, platform);
+    if (g) byCombo.set(g.combo, { combo: g.combo, command: item.command, origin: 'config', gesture: { code: g.code, ctrl: g.ctrl, meta: g.meta, alt: g.alt, shift: g.shift } });
+  }
+  for (const combo of parsed.disabled) byCombo.delete(combo);
+  const active = Array.from(byCombo.values()).sort((a, b) => (a.combo < b.combo ? -1 : a.combo > b.combo ? 1 : 0));
+  const table = {};
+  for (const item of active) table[gestureSignature(item.gesture)] = true;
+  return { active, disabled: parsed.disabled.slice().sort(), invalid: parsed.invalid, table };
+}
+
+/** 焦点交还键（`dshPanel.focusReleaseKey`，默认 F6；空串 = 关闭）。 */
+function resolveFocusReleaseKey(platform) {
+  const raw = String(cfg().get(FOCUS_RELEASE_KEY, FOCUS_RELEASE_DEFAULT) || '');
+  const lower = raw.trim().toLowerCase();
+  if (lower === '' || lower === 'off' || lower === 'none') return { combo: '', signature: null };
+  const parsed = parseCombo(raw, platform);
+  if (!parsed) {
+    if (!releaseKeyInvalidNotified) {
+      releaseKeyInvalidNotified = true;
+      statusBarMsg(`无法识别 dshPanel.focusReleaseKey = ${raw}，已回退为 ${FOCUS_RELEASE_DEFAULT}；置空可关闭焦点交还。`, 8000);
+    }
+    const fallback = parseCombo(FOCUS_RELEASE_DEFAULT, platform);
+    return fallback ? { combo: fallback.combo, signature: gestureSignature(fallback) } : { combo: '', signature: null };
+  }
+  return { combo: parsed.combo, signature: gestureSignature(parsed) };
+}
+
+/**
+ * 面板渲染与配置推送共用的状态：开关、下发给页面的转发表、焦点交还键。
+ * @returns {{enabled: boolean, table: Record<string, boolean>, releaseKey: string|null, built: object, releaseCombo: string}}
+ */
+function forwardKeysState() {
+  const built = buildForwardTable(process.platform, cfg().get(FORWARD_MAP_KEY, {}));
+  const enabled = shouldForwardVSCodeKeys();
+  if (!enabled) {
+    return { enabled: false, table: {}, releaseKey: null, built, releaseCombo: '' };
+  }
+  const release = resolveFocusReleaseKey(process.platform);
+  let releaseKey = release.signature;
+  if (releaseKey !== null && built.table[releaseKey]) {
+    // 焦点交还键与转发键重叠：两者语义冲突，交还优先会静默吞掉转发，所以拒绝交还。
+    releaseKey = null;
+    if (!releaseKeyConflictNotified) {
+      releaseKeyConflictNotified = true;
+      statusBarMsg(`dshPanel.focusReleaseKey（${release.combo}）与转发表重叠，已停用焦点交还；请换一个组合。`, 8000);
+    }
+  }
+  if (built.invalid.length > 0 && !keysInvalidNotified) {
+    keysInvalidNotified = true;
+    const sample = built.invalid.slice(0, 3).join('、');
+    statusBarMsg(`已忽略 ${built.invalid.length} 条快捷键配置（${sample}）：键名或命令 id 不合法，可执行「DeepSeek Harness: 查看快捷键转发」核对。`, 10000);
+  }
+  return { enabled: true, table: built.table, releaseKey, built, releaseCombo: releaseKey ? release.combo : '' };
+}
+
+/** 页面发来的 gesture 是否合规（中继已校验一次，这里是纵深防御）。 */
+function sanitizeGesture(raw) {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
+  const allowed = { code: true, ctrl: true, meta: true, alt: true, shift: true };
+  for (const key of Object.keys(raw)) {
+    if (!allowed[key]) return null; // 多一个字段就整条丢弃（页面无法夹带命令 id）
+  }
+  if (typeof raw.code !== 'string' || !/^[A-Za-z][A-Za-z0-9]{0,15}$/.test(raw.code)) return null;
+  for (const flag of ['ctrl', 'meta', 'alt', 'shift']) {
+    if (typeof raw[flag] !== 'boolean') return null;
+  }
+  return { code: raw.code, ctrl: raw.ctrl, meta: raw.meta, alt: raw.alt, shift: raw.shift };
+}
+
+/**
+ * 把一个 gesture 翻译成命令并执行。命令 id 只来自宿主自己的表——页面只能描述按键。
+ * @param {unknown} raw
+ */
+function forwardGestureToCommand(raw) {
+  if (!shouldForwardVSCodeKeys()) return;
+  const gesture = sanitizeGesture(raw);
+  if (!gesture) return;
+  const sig = gestureSignature(gesture);
+  const built = buildForwardTable(process.platform, cfg().get(FORWARD_MAP_KEY, {}));
+  const hit = built.active.find((item) => gestureSignature(item.gesture) === sig);
+  if (!hit) {
+    // 页面表与宿主表不一致（配置刚改、消息乱序）：不猜，给一次可见提示。
+    if (!forwardUnknownNotified.has(sig)) {
+      forwardUnknownNotified.add(sig);
+      const combo = signatureToCombo(sig) || sig;
+      statusBarMsg(`快捷键 ${combo} 未被转发：它不在当前转发表里（配置可能已变更）。`, 8000);
+    }
+    return;
+  }
+  Promise.resolve()
+    .then(() => vscode.commands.executeCommand(hit.command))
+    .then(() => {}, (e) => notifyForwardFailure(hit.command, e));
+}
+
+/** 命令执行失败（多为命令不存在）：每个命令只提示一次，并给出出路。 */
+function notifyForwardFailure(command, error) {
+  if (forwardFailureNotified.has(command)) return;
+  forwardFailureNotified.add(command);
+  const detail = error && error.message ? String(error.message).slice(0, 200) : '未知错误';
+  statusBarMsg(`快捷键转发失败：未找到命令 ${command}（${detail}）。请检查 dshPanel.forwardKeybindings。`, 10000);
+}
+
+/** 页面回报的运行状态：只接受白名单字段，非法条目丢弃。 */
+function normalizeKeysStatus(msg) {
+  if (!msg || typeof msg !== 'object') return null;
+  const shadowed = [];
+  const rows = Array.isArray(msg.shadowed) ? msg.shadowed : [];
+  for (const row of rows.slice(0, 32)) {
+    if (!row || typeof row.sig !== 'string' || !GESTURE_SIGNATURE.test(row.sig)) continue;
+    const combo = signatureToCombo(row.sig);
+    if (combo === '') continue;
+    const command = typeof row.command === 'string' && row.command.length <= 128 && FORWARD_COMMAND_ID.test(row.command) ? row.command : '';
+    shadowed.push({ combo, command });
+  }
+  return { degraded: msg.degraded === true, shadowed, at: Date.now() };
+}
+
+/** 配置变更 / 面板就绪后，把转发表推给 webview（不重载 iframe）。 */
+function pushForwardKeysConfig() {
+  keysRuntimeStatus = null;
+  // 配置改过之后允许重新告警一次：否则用户改出新错误时永远看不到提示。
+  keysInvalidNotified = false;
+  releaseKeyInvalidNotified = false;
+  releaseKeyConflictNotified = false;
+  const target = activeTab || activeView;
+  if (!target) return;
+  const state = forwardKeysState();
+  try {
+    target.webview.postMessage({ type: 'dsh-keys-config', enabled: state.enabled, table: state.table, releaseKey: state.releaseKey });
+  } catch { /* 面板已销毁：忽略 */ }
+}
+
+/** 是否安装内置快捷键转发插件（`dshPanel.forwardVSCodeKeys`，默认开）。 */
+function shouldInstallKeysPlugin() {
+  return shouldForwardVSCodeKeys();
+}
+
+/**
+ * 确保内置快捷键转发插件已落盘并声明（不经 npm）。
+ * 只有客户端半边干活：面板内识别按键后交给宿主执行命令。
+ */
+function ensureKeysPlugin(profileDir) {
+  return ensureBundledPlugin(profileDir, KEYS_PLUGIN_NAME, '快捷键转发');
+}
+
+/** 把一条转发条目写进用户设置（Global）：UI 添加键位时用。 */
+async function setForwardKey(combo, value) {
+  const raw = cfg().get(FORWARD_MAP_KEY, {});
+  const next = Object.assign({}, raw && typeof raw === 'object' && !Array.isArray(raw) ? raw : {});
+  next[combo] = value === false ? false : String(value);
+  await cfg().update(FORWARD_MAP_KEY, next, vscode.ConfigurationTarget.Global);
+  pushForwardKeysConfig();
+}
+
+/** 「添加转发键」流程：先校验组合键，再从命令列表里挑一个命令。 */
+async function addForwardKey(platform) {
+  const input = await vscode.window.showInputBox({
+    prompt: '要转发的组合键（mod = macOS 的 ⌘ / 其它平台的 Ctrl；不支持两段式）',
+    placeHolder: '例如 ctrl+shift+y',
+    ignoreFocusOut: true,
+    validateInput: (value) => (parseCombo(value, platform) ? '' : '无法解析：请写成 修饰键+主键（必须有修饰键），例如 ctrl+shift+y')
+  });
+  if (!input) return;
+  const parsed = parseCombo(input, platform);
+  if (!parsed) return;
+  const all = await vscode.commands.getCommands(true);
+  const items = (Array.isArray(all) ? all : [])
+    .filter((id) => typeof id === 'string' && FORWARD_COMMAND_ID.test(id))
+    .map((id) => ({ label: id }));
+  const picked = await vscode.window.showQuickPick(items, {
+    placeHolder: '选择要执行的 VS Code 命令（可输入过滤；也可在命令面板右键「复制命令 ID」后手写配置）',
+    matchOnDescription: true,
+    ignoreFocusOut: true
+  });
+  if (!picked) return;
+  await setForwardKey(parsed.combo, picked.label);
+  vscode.window.showInformationMessage(`已转发 ${parsed.combo} → ${picked.label}（写入用户设置，立即生效）`);
+}
+
+/** 把当前转发表导出成 Markdown（贴 issue / 文档用）。 */
+function forwardKeysMarkdown(state, status) {
+  const lines = [];
+  lines.push('# DSH 面板快捷键转发');
+  lines.push('');
+  lines.push('- 开关：' + (state.enabled ? '开启' : '关闭'));
+  lines.push('- 焦点交还键：' + (state.releaseCombo || '已关闭'));
+  if (!state.enabled) lines.push('- 说明：`dshPanel.forwardVSCodeKeys = false` 时不安装插件、不转发。');
+  if (status && status.degraded) lines.push('- ⚠️ 降级模式：无法读取 DSH 键位表，是否让位未知。');
+  lines.push('');
+  lines.push('## 生效中');
+  lines.push('');
+  lines.push('| 组合 | 命令 | 来源 |');
+  lines.push('| --- | --- | --- |');
+  for (const item of state.built.active) lines.push(`| ${item.combo} | \`${item.command}\` | ${item.origin === 'config' ? '设置' : '默认'} |`);
+  if (state.built.disabled.length > 0) {
+    lines.push('');
+    lines.push('## 已禁用（设置里写 false）');
+    lines.push('');
+    for (const combo of state.built.disabled) lines.push('- ' + combo);
+  }
+  if (state.built.invalid.length > 0) {
+    lines.push('');
+    lines.push('## 已忽略（格式不合法）');
+    lines.push('');
+    for (const raw of state.built.invalid) lines.push('- ' + raw);
+  }
+  lines.push('');
+  lines.push('## 让位给 DSH');
+  lines.push('');
+  if (!status) lines.push('打开面板后可读取 DSH 键位表，这里才会出现让位清单。');
+  else if (status.shadowed.length === 0) lines.push('（无）');
+  else {
+    lines.push('| 组合 | DSH 命令 |');
+    lines.push('| --- | --- |');
+    for (const row of status.shadowed) lines.push(`| ${row.combo} | ${row.command || '（未知）'} |`);
+  }
+  return lines.join('\n') + '\n';
+}
+
+/** 「查看快捷键转发」：四分组清单 + 添加 / 复制 / 打开设置。 */
+async function showKeyStatus() {
+  const platform = process.platform;
+  const state = forwardKeysState();
+  const status = keysRuntimeStatus;
+  const items = [];
+  const sep = (label) => {
+    const kind = vscode.QuickPickItemKind && vscode.QuickPickItemKind.Separator;
+    items.push(kind === undefined ? { label: '—— ' + label + ' ——', action: 'noop' } : { label, kind, action: 'noop' });
+  };
+  const push = (label, description, action, extra) => {
+    items.push(Object.assign({ label, description, action }, extra || {}));
+  };
+
+  if (!state.enabled) {
+    push('$(circle-slash) 已关闭：dshPanel.forwardVSCodeKeys = false', '开启后才会安装插件并转发快捷键', 'noop');
+  } else if (!status) {
+    push('$(sync) 快捷键转发尚未确认生效', '插件需重启 dsh web 才会加载；打开面板后可读取运行状态', 'noop');
+  } else if (status.degraded) {
+    push('$(warning) 降级模式：无法读取 DSH 键位表', '可能与 DSH 快捷键冲突（是否让位未知）', 'noop');
+  } else {
+    push('$(check) 快捷键转发生效中', `焦点交还：${state.releaseCombo || '已关闭'}`, 'noop');
+  }
+  sep('生效中');
+  if (state.built.active.length === 0) push('（无）', '', 'noop');
+  for (const item of state.built.active) {
+    push(item.combo, `${item.command}${item.origin === 'config' ? '（来自设置）' : '（默认）'}`, 'disable', { combo: item.combo });
+  }
+  if (state.built.disabled.length > 0) {
+    sep('已禁用');
+    for (const combo of state.built.disabled) push(combo, '设置里写 false，永不被转发', 'noop');
+  }
+  if (state.built.invalid.length > 0) {
+    sep('已忽略（格式不合法）');
+    for (const combo of state.built.invalid) push(combo, '键名或命令 id 不合法，已忽略', 'noop');
+  }
+  sep('让位给 DSH');
+  if (!status) push('（打开面板后可读取）', 'DSH 键位表在页面里，只有面板加载后才拿得到', 'noop');
+  else if (status.shadowed.length === 0) push('（无）', '当前转发表与 DSH 键位不重叠', 'noop');
+  else for (const row of status.shadowed) push(row.combo, `DSH 已占用：${row.command || '（未知）'}`, 'noop');
+  sep('操作');
+  push('$(add) 添加转发键…', '选择组合键与命令，写入用户设置，立即生效', 'add');
+  push('$(clippy) 复制为 Markdown', '把四类清单贴到 issue / 文档', 'copy');
+  push('$(gear) 打开设置', FORWARD_MAP_KEY, 'settings');
+
+  const picked = await vscode.window.showQuickPick(items, {
+    placeHolder: 'DSH 面板内转发的 VS Code 快捷键',
+    matchOnDescription: true,
+    ignoreFocusOut: true
+  });
+  if (!picked || !picked.action || picked.action === 'noop') return;
+  if (picked.action === 'add') return addForwardKey(platform);
+  if (picked.action === 'settings') {
+    vscode.commands.executeCommand('workbench.action.openSettings', FORWARD_MAP_KEY);
+    return;
+  }
+  if (picked.action === 'copy') {
+    const text = forwardKeysMarkdown(state, status);
+    await vscode.env.clipboard.writeText(text);
+    vscode.window.showInformationMessage('快捷键转发表已复制到剪贴板');
+    return;
+  }
+  if (picked.action === 'disable') {
+    await setForwardKey(picked.combo, false);
+    vscode.window.showInformationMessage(`已停止转发 ${picked.combo}（设置项 dshPanel.forwardKeybindings）`);
+  }
+}
+
 /**
  * 确保 DSH web profile 已安装并声明 dsh-drop-caret 插件。
  * @returns {Promise<boolean>} 本次是否发生了新增/升级安装（true 时通常需重启 dsh web 生效）。
@@ -3027,6 +3682,13 @@ async function ensureDshPlugins() {
     // 可经 dshPanel.installOpenExternalPlugin 关闭。
     if (cfg().get('dshPanel.installOpenExternalPlugin', true)) {
       if (await ensureOpenExternalPlugin(profileDir)) {
+        changed = true;
+      }
+    }
+    // 内置快捷键转发插件：面板内按下的工作台级快捷键交给宿主执行。
+    // 总开关关闭时不安装/不更新——页面拿不到 keys-ack，行为与本能力之前完全一致。
+    if (shouldInstallKeysPlugin()) {
+      if (await ensureKeysPlugin(profileDir)) {
         changed = true;
       }
     }
@@ -3623,6 +4285,25 @@ function handleWebviewMessage(msg, webview) {
         8000
       );
     }
+  } else if (msg && msg.type === 'dsh-forwarded-key') {
+    // 面板内按下的快捷键（spec 008）：页面只上报物理键事实，命令 id 由宿主的表决定。
+    forwardGestureToCommand(msg.gesture);
+  } else if (msg && msg.type === 'dsh-focus-released') {
+    // 焦点已交还 VS Code：告知一次，并说明怎么回到面板（键盘党唯一不清楚的地方）。
+    if (!focusReleasedNotified) {
+      focusReleasedNotified = true;
+      statusBarMsg('焦点已交给 VS Code：可直接按快捷键；回到 DSH 请点击面板。', 6000);
+    }
+  } else if (msg && msg.type === 'dsh-keys-status') {
+    // 页面回报运行时状态（降级 / 让位清单）：供「查看快捷键转发」展示，不参与转发判定。
+    const status = normalizeKeysStatus(msg);
+    if (status) {
+      keysRuntimeStatus = status;
+      if (status.degraded && !keysDegradedNotified) {
+        keysDegradedNotified = true;
+        statusBarMsg('快捷键转发处于降级模式：无法读取 DSH 键位表，可能与 DSH 快捷键冲突。', 8000);
+      }
+    }
   } else if (msg && msg.type === 'dsh-workspace-pin-result' && msg.status !== 'done' && msg.status !== 'already') {
     // 切换失败 / 旧版 dsh：必须让用户看见，并给出下一步（禁止静默降级）。
     if (!workspacePinFailureNotified) {
@@ -3701,7 +4382,7 @@ async function preparePanelHtml(isTab) {
   const pluginInstalled = await ensureDshPlugins();
   if (pluginInstalled && (await checkUrl(getUrl()))) {
     // 服务已在运行但插件刚装上，需重启 dsh web 才加载。
-    vscode.window.showInformationMessage('已自动安装/更新 DSH 插件（dsh-drop-caret / dsh-webview-clipboard / dsh-vscode-file-links / dsh-vscode-layout / dsh-vscode-workspace），请点击面板顶部的「重启 dsh web」使其生效。');
+    vscode.window.showInformationMessage('已自动安装/更新 DSH 插件（dsh-drop-caret / dsh-webview-clipboard / dsh-vscode-file-links / dsh-vscode-layout / dsh-vscode-workspace / dsh-vscode-keys），请点击面板顶部的「重启 dsh web」使其生效。');
   }
 
   const ok = await ensureRunningOnce();
@@ -5348,7 +6029,14 @@ function activate(context) {
       view.webview.onDidReceiveMessage((m) => handleWebviewMessage(m, view.webview));
 
       const cfgSub = vscode.workspace.onDidChangeConfiguration((e) => {
-        if (e.affectsConfiguration(SIDEBAR_POLICY_KEY)) {
+        if (e.affectsConfiguration(FORWARD_MAP_KEY) || e.affectsConfiguration(FORWARD_KEYS_KEY) || e.affectsConfiguration(FOCUS_RELEASE_KEY)) {
+          // 快捷键转发：只推消息换表，不重载 iframe（DSH 对话与输入不丢）。
+          pushForwardKeysConfig();
+          if (e.affectsConfiguration(FORWARD_KEYS_KEY) && shouldForwardVSCodeKeys()) {
+            // 从关闭重新打开时补装插件（装上仍需重启 dsh web 才会加载）。
+            ensureDshPlugins().catch(() => {});
+          }
+        } else if (e.affectsConfiguration(SIDEBAR_POLICY_KEY)) {
           // 侧栏策略单独处理：只推消息重算，不重载 iframe。
           applySidebarPolicyChange();
         } else if (e.affectsConfiguration('dshPanel')) {
@@ -5411,7 +6099,13 @@ function activate(context) {
 
     const cfgSub = vscode.workspace.onDidChangeConfiguration((e) => {
       if (disposed) return;
-      if (e.affectsConfiguration(SIDEBAR_POLICY_KEY)) {
+      if (e.affectsConfiguration(FORWARD_MAP_KEY) || e.affectsConfiguration(FORWARD_KEYS_KEY) || e.affectsConfiguration(FOCUS_RELEASE_KEY)) {
+        // 快捷键转发：只推消息换表，不重载 iframe（DSH 对话与输入不丢）。
+        pushForwardKeysConfig();
+        if (e.affectsConfiguration(FORWARD_KEYS_KEY) && shouldForwardVSCodeKeys()) {
+          ensureDshPlugins().catch(() => {});
+        }
+      } else if (e.affectsConfiguration(SIDEBAR_POLICY_KEY)) {
         applySidebarPolicyChange();
       } else if (e.affectsConfiguration('dshPanel')) {
         reloadTab();
@@ -5556,6 +6250,11 @@ function activate(context) {
     showChatStatus().catch((e) => vscode.window.showErrorMessage('检查 DSH 状态失败：' + (e && e.message ? e.message : String(e))));
   });
 
+  // 查看/编辑面板内转发的 VS Code 快捷键（spec 008）：四分组清单 + 添加 / 禁用 / 导出。
+  const keyStatusCmd = vscode.commands.registerCommand('dshPanel.keyStatus', () => {
+    showKeyStatus().catch((e) => vscode.window.showErrorMessage('查看快捷键转发失败：' + (e && e.message ? e.message : String(e))));
+  });
+
   // 切换 DSH 侧栏显示：与面板顶部按钮等价，供命令面板 / 快捷键使用。
   const toggleDshSidebarCmd = vscode.commands.registerCommand('dshPanel.toggleDshSidebar', () => {
     const target = activeTab || activeView;
@@ -5608,6 +6307,29 @@ module.exports.__internals = {
   CLIPBOARD_PLUGIN_NAME,
   CLIPBOARD_MAX_TEXT,
   CLIPBOARD_TIMEOUT_MS,
+  shouldForwardVSCodeKeys,
+  shouldInstallKeysPlugin,
+  ensureKeysPlugin,
+  forwardKeysState,
+  buildForwardTable,
+  parseForwardKeybindings,
+  parseCombo,
+  normalizeCombo,
+  comboToGesture,
+  gestureSignature,
+  signatureToCombo,
+  sanitizeGesture,
+  forwardGestureToCommand,
+  normalizeKeysStatus,
+  pushForwardKeysConfig,
+  showKeyStatus,
+  DEFAULT_FORWARD_KEYS,
+  KEYS_PLUGIN_NAME,
+  KEYS_PLUGIN_SOURCE,
+  FORWARD_KEYS_KEY,
+  FORWARD_MAP_KEY,
+  FOCUS_RELEASE_KEY,
+  FORWARD_MAX_ENTRIES,
   fileLinkPluginFiles,
   fileLinkPluginVersion,
   ensureFileLinkPlugin,

@@ -4,6 +4,16 @@
 
 ## 1.0.6
 
+**面板内快捷键（新增）**
+
+- **面板里终于能用 VS Code 快捷键了**：焦点在 DSH 页面里时，`keydown` 只落在跨源 iframe 内、不会冒泡给 VS Code（[microsoft/vscode#65452](https://github.com/microsoft/vscode/issues/65452)），`Ctrl/Cmd+Shift+P`、`Ctrl/Cmd+P` 等一律失效。新增内置插件 `dsh-vscode-keys`：页面侧识别 13 个**工作台级**组合（命令面板、快速打开、资源管理器、侧栏/面板开关、源代码管理、扩展、调试、设置、全局搜索、终端、打开文件、F1），经 webview 中继交给宿主 `executeCommand` 执行。
+- **与 DSH 零冲突**：每次按键前读 DSH 自己的键位目录（`ctx.shortcuts.catalog` / `fixedCatalog`，含用户改绑后的结果），命中即让位——`Ctrl/Cmd+Shift+F` 仍是 DSH 的 fork 会话、`Ctrl/Cmd+\`` 仍是 DSH 的终端；在 DSH 快捷键面板（`Ctrl/Cmd+/`）改绑后让位判定立即跟随，不需重启。
+- **F6 交还焦点（默认开启）**：交还后可用任意自定义键位与两段式快捷键；办完事点一下面板即回到 DSH。
+- **可见、可改**：命令 `DeepSeek Harness: 查看快捷键转发` 列出「生效中 / 已禁用 / 因 DSH 占用而让位」三类清单，并可直接添加/禁用（写入用户设置，立即生效）或复制为 Markdown。新增 `dshPanel.forwardVSCodeKeys`（默认 `true`）、`dshPanel.forwardKeybindings`、`dshPanel.focusReleaseKey`。
+- **不抢 DSH 弹窗里的按键**：DSH 的快捷键设置（按键录制）、审批等弹窗打开时插件完全不接管键盘（`dsh-vscode-keys` 0.2.0），否则录制 `Ctrl+Shift+,` 这类键会被转发走。
+- **排障接口**：面板 DevTools 里 `__dshVscodeKeys.status()` / `.bindings()` / `.owner('Comma|1|0|0|1')` / `.rows()` / `.prefs()` / `.refresh()` 可查看「我们认定的 DSH 键位」、DSH 实际绑定与持久化原文（`dsh.keybindings.v1`），便于确认「到底有没有让位」。
+- 不支持两段式（`ctrl+k ctrl+s`），也不读用户 `keybindings.json`（Remote 下文件在客户端、扩展在服务端）；配置里的非法条目逐条忽略并一次性提示；命令不存在时状态栏提示一次并指出检查位置。
+
 **忠实窗口（面板）**
 
 - **修复面板内 DSH「复制」按钮无法复制**：代码块、消息操作条、JSON 复制都走 `navigator.clipboard.writeText`，而 VS Code 的权限策略会拒绝 webview 内层跨源 iframe（[microsoft/vscode#182642](https://github.com/microsoft/vscode/issues/182642)）；DSH 捕获失败后直接返回、不再回退，表现为「点了复制没反应」。内置插件 `dsh-webview-clipboard` 升级到 0.3.0（全平台生效）：包装 `writeText`，按「原生 → 宿主 `vscode.env.clipboard` → `execCommand`」三级回退，只在面板内嵌时接管，系统浏览器直开 DSH 行为不变。
@@ -15,10 +25,13 @@
 
 **测试**
 
+- 新增 `test/key-bridge.test.js`（75 项）：`normalizeCombo` 三平台展开与 chord/无修饰键拒绝、配置逐条校验与 64 条上限、默认表合并与禁用、`vm` 真跑中继（`keys-ack`、gesture 白名单、F6 交还焦点、配置热更新）、宿主只按自己的表执行命令与失败提示只一次。
+- 新增 `test/key-bridge-client.test.js`（49 项）：插件客户端仿真（未握手不介入、只上报物理键事实、DSH 目录让位与订阅跟随、降级仍转发、DSH 弹窗内不抢键、排障 API、IME/长按/页面已处理不拦、独立浏览器不介入）。
 - 同步上游测试：新增 `desktop-app-support`、`remote-auth-proxy`、`open-external-plugin` 三套，重写 `remote-mode` 断言。
 - 新增 `test/clipboard-bridge.test.js`（16 项）：中继转发与 origin/source 双校验、超长拒绝与回执、宿主写入成功/失败、失败提示只一次。
 - `test/clipboard-plugin.test.js` 扩到 42 项：新增客户端仿真（原生成功不发消息、原生被拒走宿主、无回执/`ok:false` 走 `execCommand`、非 iframe 不接管、未知 token 忽略）。合并上游后全量 19 套 / 746 项断言。
 - 规格：[007-webview-clipboard-copy](docs/sdd/specs/007-webview-clipboard-copy/spec.md)。
+- 规格：[008-webview-keybridge](docs/sdd/specs/008-webview-keybridge/spec.md)。
 
 ## 1.0.5
 

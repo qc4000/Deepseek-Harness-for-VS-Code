@@ -199,6 +199,7 @@ profile 目录：`$DSH_HOME`（默认 `~/.dsh`）`/profiles/web`；插件写入
 | `dsh-vscode-file-links` | `dsh-plugins/` 真实文件随扩展分发 | 见插件 `package.json` | 工作区文件/文件夹链接改在 VS Code 资源管理器定位/打开 |
 | `dsh-vscode-changes` | `dsh-plugins/` 真实文件随扩展分发（**仅宿主半边**） | 见插件 `package.json` | 把「某会话某轮里某文件的两侧全文」出口成一条鉴权 GET 路由（`/api/dsh-vscode.changes-file`），供轮级 diff；仅 `workspaceFileLinkAction=diffAndOpen` 时安装 |
 | `dsh-vscode-workspace` | `dsh-plugins/` 真实文件随扩展分发（客户端半边干活，宿主半边 no-op） | 见插件 `package.json` | 面板加载后把 DSH 当前工作区切到 VS Code 文件夹：`ctx.workspaces.create({path})` + `ctx.uiWorkspace.openWorkspace(id)`；`dshPanel.pinWorkspaceToVSCode=false` 时不安装 |
+| `dsh-vscode-keys` | `dsh-plugins/` 真实文件随扩展分发（客户端半边干活，宿主半边 no-op） | 见插件 `package.json` | 面板内按下的工作台级快捷键转发给宿主 `executeCommand`；每次按键前读 DSH 自己的键位目录（`ctx.shortcuts.catalog` / `fixedCatalog`）做签名比对，**命中即让位**；`dshPanel.forwardVSCodeKeys=false` 时不安装、不握手 |
 
 两个与 diff 相关的插件用到的 DSH 字段（均为实测，非公开契约，结构不符即 404）：
 
@@ -237,6 +238,21 @@ webview → 宿主：{ type:'dsh-workspace-pin-unavailable' }   // 8s 内没收�
 - 宿主侧 `resolveWorkspaceTarget()`：规范化 → 去行号（`:12` / `#L12`）→ 相对路径对每个工作区文件夹
   生成候选 → 必须 `isInsideFolder` 且 `stat` 成功；绝对路径同样要求在工作区内。
 - 成功才回执 `ok:true`；失败回执 `ok:false`，插件 2.5s 内未收到回执也会回放原始点击。
+
+**快捷键转发消息协议**（spec 008；独立类型，不复用 `ack`）：
+
+```
+插件 → 中继：{ source:'dsh-vscode-keys', type:'hello' }
+中继 → 插件：{ source:'dsh-vscode-host', type:'keys-ack', table, releaseKey }   // table: 物理键签名 → true
+插件 → 中继：{ type:'key', gesture:{code,ctrl,meta,alt,shift} } | { type:'focus-release' } | { type:'keys-status', degraded, shadowed[] }
+中继 → 宿主：{ type:'dsh-forwarded-key', gesture } | { type:'dsh-focus-released' } | { type:'dsh-keys-status', degraded, shadowed[] }
+宿主 → 中继：{ type:'dsh-keys-config', enabled, table, releaseKey }               // 配置热更新，不重载 iframe
+```
+
+- `gesture` 只描述**物理键事实**；命令 id 由宿主按自己的转发表查——页面无法让宿主执行任意命令。
+- 中继对 `gesture` 做字段白名单 + 类型 + 长度校验，多一个字段（如 `command`）整条丢弃。
+- `table` 里不出现命令 id；表由宿主编译（`buildForwardTable`），页面只做签名命中。
+- 优先级：DSH 键位目录 > 用户配置 > 默认表（用户改绑 DSH 键位后目录订阅立即生效）；`F6` 交还焦点把焦点落到外层 `#dsh-stage`（不合成按键）。
 
 ## 7. 状态与持久化
 
@@ -278,3 +294,7 @@ webview → 宿主：{ type:'dsh-workspace-pin-unavailable' }   // 8s 内没收�
 7. **侧栏裁剪依赖 DSH 内部布局**：`_sidebarCol` 类名 token、264–420/56 三档宽度、1024 断点、8px 拖动条、
    300ms 折叠动画都是 dsh 0.2.x 的实现细节。DSH 升级后若读取不到宽度，插件会沉默、宿主会提示
    「未隐藏」并保持原样——**不会切掉对话内容**；但需要回归 `test/dsh-sidebar.test.js` + 实机确认。
+8. **快捷键转发只覆盖工作台级白名单**：不支持两段式（`ctrl+k …`，需页面侧前缀状态机，会与 DSH 自己的
+   `secondCode` 序列互相干扰）；不读用户 `keybindings.json`（Remote 下文件在客户端、扩展在服务端）；
+   命中 DSH 键位目录时一律让位，用户想拿回某个键需在 DSH 快捷键面板里改绑；`F6` 交还焦点后再按 F6
+   走 VS Code 自己的「切到下一部分」语义。`shortcuts` 服务缺失时降级为静态表（状态栏提示一次）。

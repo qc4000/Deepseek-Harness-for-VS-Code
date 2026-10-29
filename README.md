@@ -84,6 +84,49 @@
 | `dshPanel.remoteAuthProxy` | `true` | Remote-SSH / Dev Containers 等真远程窗口下是否启用受管认证代理（默认启用）；代理只监听服务器回环，多用户共享服务器建议关闭，关闭后面板会给出浏览器认证引导 |
 | `dshPanel.workspaceFileLinkAction` | `revealAndOpen` | 对话里工作区文件/文件夹链接的点击行为：`revealAndOpen` 资源管理器定位并打开 / `diffAndOpen` 定位 + 展示变更（并排 diff，见下节）/ `revealOnly` 仅定位 / `off` 不接管（保持 DSH 侧边栏打开，也不安装配套插件） |
 | `dshPanel.dshSidebar` | `auto` | DSH 左侧栏显示策略：`auto` 窄面板（<1024px）自动隐藏、宽面板显示 / `show` 始终显示（等同关闭本能力）/ `hide` 始终隐藏；顶部工具条可随时手动切换，修改本配置会清除手动切换 |
+| `dshPanel.forwardVSCodeKeys` | `true` | 面板内焦点时转发 VS Code 快捷键（自动安装配套插件 `dsh-vscode-keys`）。转发前先查 DSH 自己的键位表，命中即让位，不会抢 DSH 的快捷键；关闭后不安装插件、不监听按键，行为与本能力不存在时完全一致 |
+| `dshPanel.forwardKeybindings` | `{}` | 在默认转发表之上增删按键：值写命令 id 表示转发（也可覆盖默认），写 `false` 表示永不拦截。不支持两段式（`ctrl+k ctrl+s`）；无修饰键的单键不会被拦截（会破坏输入框） |
+| `dshPanel.focusReleaseKey` | `F6` | 把焦点交还 VS Code 的按键。按下后可使用任意自定义键位与两段式快捷键，办完事点一下面板回到 DSH；置空字符串可关闭（不影响快捷键转发） |
+
+### 面板内快捷键转发（v1.0.6 起）
+
+焦点在面板里时，按键只落在 DSH 页面内，不会冒泡给 VS Code（跨源 iframe 的限制，
+[microsoft/vscode#65452](https://github.com/microsoft/vscode/issues/65452)）。本扩展在 DSH 页面内装一个
+只读监听插件，把下面这些**工作台级**快捷键转给 VS Code 执行：
+
+| 组合（`mod` = macOS 的 ⌘ / 其它平台的 Ctrl） | 动作 |
+| --- | --- |
+| `mod+Shift+P` / `F1` | 命令面板 |
+| `mod+P` | 快速打开 |
+| `mod+Shift+E` / `mod+Shift+G` / `mod+Shift+X` / `mod+Shift+D` | 资源管理器 / 源代码管理 / 扩展 / 调试 |
+| `mod+B` / `mod+J` | 侧边栏 / 面板开关（侧边栏模式下会隐藏 DSH 面板本身） |
+| `mod+,` | 设置 |
+| `mod+Shift+F` / `mod+Shift+O` | 全局搜索 / 打开文件 |
+| `mod+\`` | 终端 |
+| `F6` | 把焦点交还 VS Code（之后可用任意键位，含两段式） |
+
+**与 DSH 的冲突怎么处理**：插件每次按键前都会读 DSH 自己的快捷键表（`shortcuts` 服务，含你改绑后的结果），
+命中就让位——所以 DSH 用着的键永远不会被抢（典型：`Ctrl/Cmd+Shift+F` 仍是 DSH 的 fork 会话，
+`Ctrl/Cmd+\`` 仍是 DSH 的终端）。想把这些键拿回来：在 DSH 的快捷键面板（`Ctrl/Cmd+/`）里把对应命令改绑到别的组合，
+改完立即生效，不需要重启。
+
+**自己加/删按键**：执行命令 `DeepSeek Harness: 查看快捷键转发`，能看到「生效中 / 已禁用 / 因 DSH 占用而让位」
+三类清单，并可直接添加或禁用（写入用户设置，立即生效）。也可以手写：
+
+```jsonc
+"dshPanel.forwardKeybindings": {
+  "ctrl+shift+y": "workbench.action.togglePanel",  // 新增或覆盖
+  "ctrl+shift+f": false                            // 永不拦截
+}
+```
+
+键名 = 修饰键（`mod`/`ctrl`/`meta`/`alt`/`shift`）+ 一个主键（字母、数字、`f1`–`f24`，或 `backquote`、
+`comma` 这类 code 名）；必须带修饰键，不支持两段式。命令 id 可在命令面板里右键「复制命令 ID」获得。
+
+> 已知限制：不支持两段式；不读你的 `keybindings.json`（远程场景下它在客户端，扩展在服务端）；
+> 焦点交还后再按 `F6` 会按 VS Code 自己的「切到下一部分」语义继续移动焦点。
+> Linux 上 DSH 的 web 端只允许 `Ctrl+/`、`Ctrl+Shift+,`、`Ctrl+Shift+.` 三种自定义绑定（且只有 `Ctrl+/` 有默认值），
+> 所以 Linux 的「让位」通常只在 `Ctrl+/` 这一个键上发生，其余转发表键都会生效。
 
 ### 点击对话里的文件/文件夹链接 → 在 VS Code 资源管理器中定位（v0.8.46 起）
 
