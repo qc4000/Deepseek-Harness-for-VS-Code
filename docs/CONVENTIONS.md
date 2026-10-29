@@ -115,6 +115,12 @@
 - **发版需维护者确认**：修改 `package.json` 版本号、提交版本变更、打 tag、push、打包交付均需先征得确认；
   代理/贡献者不得自行发版（本地验证、测试与文档修改不受限）。
 - 语义化版本：行为变更 `MINOR`，修复 `PATCH`，不兼容变更 `MAJOR`。
+- **调试/候选包命名**（不打 tag、不进 Release）：临时把 `package.json` 的 `version` 改为
+  semver 预发布号——日常调试 `X.Y.Z-dev.N`（每次重打包递增 `N`），候选验证 `X.Y.Z-rc.N`；
+  用 `npx --yes @vscode/vsce package <版本> --no-git-tag-version --allow-missing-repository`
+  打包。vsix 文件名由 vsce 自动生成（`<name>-<version>.vsix`），**不要手改**；
+  **预发布号一律不打 tag**：`v*` 会触发 Release 工作流并生成正式 Release。验证完用
+  `git checkout -- package.json` 恢复；正式发版仍用 `X.Y.Z` + tag `vX.Y.Z`。
 - `CHANGELOG.md` 顶部新增版本小节，按「Copilot 桥接 / 忠实窗口（面板）/ 测试」分组，用户视角描述。
 - 提交信息：`<type>: <描述>（v<版本>）`；`type ∈ feat|fix|test|docs|chore|security|merge`。
 - 一次提交只做一组相关改动；「顺手重构」单独提交，并在信息里说明 `chore:`。
