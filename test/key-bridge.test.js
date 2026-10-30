@@ -81,7 +81,7 @@ const DSH_ORIGIN = 'http://127.0.0.1:3080';
 const HOST_ID = 'dsh-vscode-host';
 const KEYS_ID = 'dsh-vscode-keys';
 const PLATFORM = process.platform;
-const sigOf = (combo) => I.gestureSignature(I.comboToGesture(combo, PLATFORM));
+const sigOf = (combo, platform) => I.gestureSignature(I.comboToGesture(combo, platform || PLATFORM));
 const flush = () => new Promise((r) => setImmediate(r));
 
 /** 把面板内联中继脚本装进一个 vm「webview 域」。 */
@@ -202,7 +202,7 @@ function makeRealm() {
     const base = I.buildForwardTable('linux', {});
     ok(base.active.length === I.DEFAULT_FORWARD_KEYS.length, '默认表条目数一致');
     ok(base.active.every((item) => item.origin === 'default'), '默认来源标记正确');
-    ok(base.table[sigOf('mod+shift+p')] === true, '默认表写进页面用的签名表');
+    ok(base.table[sigOf('mod+shift+p', 'linux')] === true, '默认表写进页面用的签名表');
     ok(base.active.some((item) => item.combo === 'ctrl+shift+f'), '第二批含全局搜索（是否让位由页面判定）');
 
     const custom = I.buildForwardTable('linux', {

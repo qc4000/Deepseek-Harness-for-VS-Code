@@ -173,8 +173,9 @@ vscodeStub.workspace.workspaceFolders = [{ uri: fileUri(REPO) }];
   ok(lineSuffix !== null && lineSuffix.kind === 'file', '带行号后缀 :120 回退命中');
   ok((await I.resolveWorkspaceTarget('extension.js#L120')) !== null, '带 #L120 后缀回退命中');
   ok((await I.resolveWorkspaceTarget('no/such/file.xyz')) === null, '不存在 → null（插件会回放到 DSH 侧边栏）');
+  // 探针在系统临时目录：Windows 下跨盘符时 path.relative 直接返回绝对路径（不以 .. 开头）。
   const escapeRel = path.relative(REPO, outsideProbe);
-  ok(escapeRel.startsWith('..'), '（前置检查）探针文件确实在工作区之外');
+  ok(escapeRel.startsWith('..') || path.isAbsolute(escapeRel), '（前置检查）探针文件确实在工作区之外');
   ok((await I.resolveWorkspaceTarget(escapeRel)) === null, '../ 越界即使文件真实存在也不接管（前提：须在工作区内）');
   ok((await I.resolveWorkspaceTarget(outsideProbe)) === null, '工作区外的绝对路径同样不接管');
   ok((await I.resolveWorkspaceTarget('')) === null, '空路径 → null');

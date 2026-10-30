@@ -77,8 +77,11 @@ export function changeCandidates(cwd, target) {
   push(raw)
   const base = typeof cwd === 'string' && cwd !== '' ? cwd.replace(/\\/g, '/').replace(/\/+$/, '') : ''
   if (base === '') return out.slice(0, 8)
-  const isAbs = raw.startsWith('/') || /^[A-Za-z]:\//.test(raw) || raw.startsWith('\\\\')
-  const abs = isAbs ? norm(raw) : norm(base + '/' + raw)
+  // 先归一化再判定绝对路径：Windows 的 `D:\a\b` / `\\server\share` 归一后才是 `D:/a/b`，
+  // 拿原始串判断会把它们当成相对路径拼到 cwd 下（CI 真机暴露）。
+  const normalizedRaw = norm(raw)
+  const isAbs = normalizedRaw.startsWith('/') || /^[A-Za-z]:\//.test(normalizedRaw)
+  const abs = isAbs ? normalizedRaw : norm(base + '/' + normalizedRaw)
   push(abs)
   if (abs.startsWith(base + '/')) push(abs.slice(base.length + 1))
   return out.slice(0, 8)

@@ -112,14 +112,19 @@ ok(I.sanitizeChangeCoord({ sessionId: 's'.repeat(129), turn: 1 }) === null, 'ses
 ok(I.sanitizeChangeCoord({ sessionId: 's\n', turn: 1 }) === null, 'sessionId 含控制字符拒绝');
 ok(I.sanitizeChangeCoord(null) === null && I.sanitizeChangeCoord('x') === null, '非对象输入拒绝');
 
-const cands = I.normalizeChangeCandidates('/w/proj', 'src/a.ts');
-ok(cands.includes('src/a.ts') && cands.includes('/w/proj/src/a.ts'), '相对路径同时产出相对与绝对候选');
-const candsAbs = I.normalizeChangeCandidates('/w/proj', '/w/proj/src/a.ts');
-ok(candsAbs.includes('/w/proj/src/a.ts') && candsAbs.includes('src/a.ts'), '绝对路径回推相对候选');
+// 工作目录用平台无关的绝对路径：Windows 下 `/w/proj` 不是绝对路径（path.resolve 会补盘符），
+// 断言不能写死 POSIX 形式。
+const proj = process.platform === 'win32' ? 'C:/w/proj' : '/w/proj';
+const cands = I.normalizeChangeCandidates(proj, 'src/a.ts');
+ok(cands.includes('src/a.ts') && cands.includes(proj + '/src/a.ts'), '相对路径同时产出相对与绝对候选');
+const candsAbs = I.normalizeChangeCandidates(proj, proj + '/src/a.ts');
+ok(candsAbs.includes(proj + '/src/a.ts') && candsAbs.includes('src/a.ts'), '绝对路径回推相对候选');
 const candsWin = I.normalizeChangeCandidates('C:/w/proj', 'src\\a.ts');
 ok(candsWin.includes('src/a.ts'), '反斜杠写法归一为 /');
-ok(I.normalizeChangeCandidates('/w/p', '../outside.ts').includes('../outside.ts'), '保留 ../ 候选（工作区上方文件以 display 匹配）');
-ok(I.normalizeChangeCandidates('/w/p', '../outside.ts').includes('/w/outside.ts'), '越界相对路径同时给出绝对候选');
+const upDir = process.platform === 'win32' ? 'C:/w/p' : '/w/p';
+const upAbs = upDir.replace(/\/p$/, '/outside.ts');
+ok(I.normalizeChangeCandidates(upDir, '../outside.ts').includes('../outside.ts'), '保留 ../ 候选（工作区上方文件以 display 匹配）');
+ok(I.normalizeChangeCandidates(upDir, '../outside.ts').includes(upAbs), '越界相对路径同时给出绝对候选');
 
 ok(I.buildDiffTitle('src/a.ts', 'turn', 7) === 'a.ts · 第 7 轮', '轮级标题写「第 N 轮」+ 文件名');
 ok(I.buildDiffTitle('src/a.ts', 'head') === 'a.ts · 与 HEAD 的差异', 'HEAD 标题与轮级可区分');

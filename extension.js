@@ -3940,9 +3940,12 @@ function normalizeLinkPath(raw) {
   return s.replace(/^(?:\.\/)+/, '');
 }
 
-/** 是否绝对路径（POSIX /、Windows 盘符 `C:/`、UNC `//server/share`）。 */
+/** 是否绝对路径（POSIX `/`、Windows 盘符 `C:/` 或 `C:\\`、UNC `\\\\server`）。 */
 function isAbsoluteLinkPath(p) {
-  return p.startsWith('/') || /^[A-Za-z]:\//.test(p);
+  // Windows 下模型/工具常给 `D:\a\b` 与 `\\server\share`；不认反斜杠会被当相对路径
+  // 拼到工作区根下，导致轮级 diff / 文件链接在 Windows 上匹配不到（CI 真机暴露）。
+  const s = String(p == null ? '' : p);
+  return s.startsWith('/') || s.startsWith('\\') || /^[A-Za-z]:[\\/]/.test(s);
 }
 
 /** 路径比较用规范形式：统一分隔符、去尾斜杠，Windows/macOS 下大小写不敏感。 */
