@@ -19,7 +19,7 @@ window.__ModuleLoader__.load({ id: 'dsh-vscode-keys', factory: (require) => {
   var module = { exports: {} }
   var exports = module.exports
 
-  var PLUGIN_VERSION = '0.2.1'
+  var PLUGIN_VERSION = '0.3.0'
   var HOST_ID = 'dsh-vscode-host'
   var SELF_ID = 'dsh-vscode-keys'
   var HELLO_INTERVAL_MS = 400
@@ -220,10 +220,44 @@ window.__ModuleLoader__.load({ id: 'dsh-vscode-keys', factory: (require) => {
     })
   }
 
+  /**
+   * 把光标放进 DSH 输入框：优先 DSH 公开能力（要求会话 scope），失败则按 composer
+   * 区域的输入控件回退（DSH 内部属性，仅作兜底）。
+   * @returns {boolean} 是否拿到焦点
+   */
+  function focusComposer() {
+    try {
+      var conv = serviceOf('conversation')
+      if (conv && conv.input && typeof conv.input.for === 'function') {
+        var facade = conv.input.for(rootCtx)
+        if (facade && typeof facade.focus === 'function') {
+          facade.focus()
+          return true
+        }
+      }
+    } catch (e) { /* 需要会话 scope：走 DOM 回退 */ }
+    try {
+      if (typeof document === 'undefined' || !document.querySelector) return false
+      var el = document.querySelector('[data-conversation-region="composer"] textarea, [data-conversation-region="composer"] [contenteditable="true"], [data-conversation-region="composer"] [contenteditable=""]')
+      if (!el || typeof el.focus !== 'function') return false
+      el.focus()
+      // 光标放到末尾：从编辑器跳回来时接着打，而不是覆盖已有草稿。
+      if (typeof el.value === 'string' && typeof el.setSelectionRange === 'function') {
+        try { el.setSelectionRange(el.value.length, el.value.length) } catch (e2) { /* 非 textarea：忽略 */ }
+      }
+      return true
+    } catch (e3) { return false }
+  }
+
   function onHostMessage(event) {
     if (event.source !== window.parent) return
     var data = event.data
     if (!data || typeof data !== 'object' || data.source !== HOST_ID) return
+    if (data.type === 'focus-input') {
+      // 宿主的显式命令：把光标放进输入框后回报，失败由宿主提示。
+      postToHost({ type: 'focus-input-result', ok: focusComposer() })
+      return
+    }
     if (data.type !== 'keys-ack') return
     var next = data.table && typeof data.table === 'object' ? data.table : {}
     acked = true

@@ -25,7 +25,11 @@ function ok(cond, name) {
 // ── vscode 桩 ───────────────────────────────────────────────────────────
 const configValues = new Map();
 const statusMessages = [];
+const warnings = [];
 const executed = [];
+const executedArgs = [];
+/** 桩里的「已注册命令」（用于探测容器命令）。 */
+let availableCommands = [];
 const vscodeStub = {
   QuickPickItemKind: { Separator: -1 },
   ConfigurationTarget: { Global: 1, Workspace: 2 },
@@ -43,20 +47,28 @@ const vscodeStub = {
     setStatusBarMessage: (t) => { statusMessages.push(t); return { dispose() {} }; },
     showInformationMessage: () => {},
     showErrorMessage: () => {},
-    showWarningMessage: () => {},
+    showWarningMessage: (t) => { warnings.push(t); },
     showQuickPick: async () => undefined,
     showInputBox: async () => undefined
   },
   commands: {
     registerCommand: () => ({ dispose() {} }),
-    getCommands: async () => [],
-    executeCommand: (cmd) => {
+    getCommands: async () => availableCommands,
+    executeCommand: (cmd, ...args) => {
       executed.push(cmd);
+      executedArgs.push({ cmd, args });
       if (cmd === 'boom.cmd') return Promise.reject(new Error('command not found'));
       return Promise.resolve();
     }
   }
 };
+/** 取最近一次 setContext 的参数（校验开关同步）。 */
+function lastSetContextArgs() {
+  for (let i = executedArgs.length - 1; i >= 0; i--) {
+    if (executedArgs[i].cmd === 'setContext') return executedArgs[i].args;
+  }
+  return null;
+}
 const origLoad = Module._load;
 Module._load = function (request) {
   if (request === 'vscode') return vscodeStub;
@@ -81,7 +93,7 @@ function makeRealm() {
   const toHost = [];
   const winListeners = [];
   const timers = [];
-  const calls = { blur: 0, focus: 0 };
+  const calls = { blur: 0, focus: 0, frameFocus: 0 };
   let timerSeq = 1;
 
   const frameWindow = { postMessage: (payload, origin) => frameMessages.push({ payload, origin }) };
@@ -89,6 +101,7 @@ function makeRealm() {
     contentWindow: frameWindow,
     style: {},
     blur: () => { calls.blur += 1; },
+    focus: () => { calls.frameFocus += 1; },
     addEventListener: () => {}
   };
   const stage = { clientWidth: 800, style: {}, focus: () => { calls.focus += 1; } };
@@ -357,6 +370,95 @@ function makeRealm() {
     ok(wv.frameMessages.some((m) => m.payload.type === 'ack' && m.payload.fileLinks === true), '文件链接握手仍正常');
     wv.fromPlugin({ source: 'dsh-webview-clipboard', type: 'clipboard-write', token: 'tk', text: 'x' });
     ok(wv.toHost.filter((m) => m.type === 'dsh-clipboard-write').length === 1, '剪贴板中继仍正常');
+  }
+
+  console.log('[15] 聚焦输入框：中继推进焦点并转发，回执结算');
+  {
+    const wv = makeRealm();
+    wv.fromHost({ type: 'dsh-focus-input' });
+    ok(wv.calls.frameFocus === 1, '调用 frame.focus()（把焦点推进 iframe）');
+    const asked = wv.frameMessages.filter((m) => m.payload.type === 'focus-input');
+    ok(asked.length === 1 && asked[0].payload.source === HOST_ID, '向页面插件发 focus-input');
+
+    wv.fromPlugin({ source: KEYS_ID, type: 'focus-input-result', ok: true });
+    const res = wv.toHost.filter((m) => m.type === 'dsh-focus-input-result');
+    ok(res.length === 1 && res[0].ok === true, '页面回执透传给宿主');
+    wv.fromPlugin({ source: KEYS_ID, type: 'focus-input-result', ok: 'yes' });
+    ok(wv.toHost.filter((m) => m.type === 'dsh-focus-input-result').pop().ok === false, '非布尔 ok 一律当失败');
+    wv.fromPlugin({ source: KEYS_ID, type: 'focus-input-result', ok: true }, { origin: 'http://evil.example' });
+    ok(wv.toHost.filter((m) => m.type === 'dsh-focus-input-result').length === 2, '错误 origin 的回执丢弃');
+  }
+
+  console.log('[16] requestInputFocus：回执成功 / 超时 / 上一笔被打断');
+  {
+    const posted = [];
+    const target = { webview: { postMessage: (m) => { posted.push(m); return Promise.resolve(true); } } };
+    const pending = I.requestInputFocus(target, 500);
+    ok(posted.length === 1 && posted[0].type === 'dsh-focus-input', '向 webview 发 dsh-focus-input');
+    I.handleWebviewMessage({ type: 'dsh-focus-input-result', ok: true });
+    ok((await pending) === true, '回执 ok:true → resolve(true)');
+
+    const slow = I.requestInputFocus(target, 30);
+    ok((await slow) === false, '无回执超时 resolve(false)');
+
+    const first = I.requestInputFocus(target, 500);
+    const second = I.requestInputFocus(target, 500);
+    ok((await first) === false, '新请求会让上一笔立即失败（不会挂死）');
+    I.handleWebviewMessage({ type: 'dsh-focus-input-result', ok: false });
+    ok((await second) === false, '当前请求按回执结算');
+  }
+
+  console.log('[17] 设置与贡献点：关掉默认键位走 when 上下文');
+  {
+    const pkg = JSON.parse(require('fs').readFileSync(path.join(__dirname, '..', 'package.json'), 'utf8'));
+    const contributes = pkg.contributes || {};
+    const cmd = (contributes.commands || []).find((c) => c.command === 'dshPanel.focusInput');
+    ok(cmd && /聚焦 DSH 输入框/.test(cmd.title), '命令已声明');
+    const kb = (contributes.keybindings || []).find((k) => k.command === 'dshPanel.focusInput');
+    ok(kb && kb.key === 'ctrl+shift+j' && kb.mac === 'cmd+shift+j', '默认键位 Ctrl+Shift+J / ⇧⌘J（避开 Linux 桌面快捷键与 Alt）');
+    ok(kb && kb.when === I.FOCUS_INPUT_CONTEXT, '键位受 when 上下文控制（可彻底解绑）');
+    const prop = (contributes.configuration.properties || {})[I.FOCUS_INPUT_KEY];
+    ok(prop && prop.type === 'boolean' && prop.default === true, '设置项 dshPanel.focusInputEnabled 默认开');
+
+    const before = executed.length;
+    configValues.set(I.FOCUS_INPUT_KEY, false);
+    await I.syncFocusInputContext();
+    ok(executed.length === before + 1 && executed[executed.length - 1] === 'setContext', '关闭时把上下文置 false');
+    const last = lastSetContextArgs();
+    ok(last && last[0] === I.FOCUS_INPUT_CONTEXT && last[1] === false, 'setContext(上下文, false)');
+    configValues.delete(I.FOCUS_INPUT_KEY);
+  }
+
+  console.log('[18] 面板未打开：多条候选命令，且绝不用「视图选择器」兜底');
+  {
+    availableCommands = ['workbench.view.extension.vithrive.deepseek-harness-vscode.dsh-panel'];
+    const cmds = await I.resolveContainerCommands();
+    ok(cmds[0] === 'dsh.webview.focus', '首选视图级命令 <viewId>.focus（最精确）');
+    ok(cmds[1] === 'workbench.view.extension.dsh-panel', '其次容器命令');
+    ok(cmds.indexOf('workbench.view.extension.vithrive.deepseek-harness-vscode.dsh-panel') > 1, '探测到的命名空间容器命令作为后手');
+    ok(cmds.indexOf('workbench.action.openView') === -1, '不再把「视图选择器」当兜底');
+
+    const before = executed.length;
+    const view = await I.openDshPanel(20);
+    ok(view === null, '当前窗口没有视图时返回 null');
+    const tried = executed.slice(before);
+    ok(tried[0] === 'dsh.webview.focus', '先试视图级命令');
+    ok(tried.indexOf('workbench.action.openView') === -1, '全程不调用 openView（不会弹选择器）');
+
+    availableCommands = [];
+    const warnBefore = warnings.length;
+    await I.focusDshInput(20);
+    ok(warnings.length === warnBefore + 1, '打不开时给一次警告');
+    const text = warnings[warnings.length - 1];
+    ok(text.includes('已尝试') && text.includes('dsh.webview.focus'), '提示列出实际尝试过的命令（可定位环境差异）');
+    ok(text.includes('Open View'), '给出可操作出路');
+
+    // 注入一个「立刻有视图」的探测：首条候选即成功，并记下是哪条生效。
+    availableCommands = [];
+    const fakeView = { webview: { postMessage: async () => true }, show: async () => {} };
+    const opened = await I.openDshPanel(20, () => fakeView);
+    ok(opened === fakeView, '注入视图后立即返回');
+    ok(I.lastOpenedWith() === 'dsh.webview.focus', '记录真正生效的命令（真实环境实测就是这条）');
   }
 
   console.log('\n全部通过：' + passed + ' 项断言 ✓');

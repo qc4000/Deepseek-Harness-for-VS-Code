@@ -53,6 +53,20 @@ function makeShortcuts(initial, fixed) {
   };
 }
 
+/** 伪造 DSH 的 conversation 服务（`input.for(ctx).focus()`）。 */
+function makeConversation(behaviour) {
+  const focused = { count: 0 };
+  return {
+    focused,
+    input: {
+      for: () => {
+        if (behaviour === 'throw') throw new Error('conversation.input.for requires a retained Session scope');
+        return { focus: () => { focused.count += 1; } };
+      }
+    }
+  };
+}
+
 /** 造一个仿真环境：window + ModuleLoader；返回可驱动的句柄。 */
 function makeEnv(options = {}) {
   const posted = [];      // 插件 → 父级（webview）
@@ -80,9 +94,15 @@ function makeEnv(options = {}) {
     window: win,
     console: { warn() {}, error() {}, log() {} }
   };
-  // DSH 弹窗（按键录制 / 设置）打开时的探测：只有显式打开才提供 document。
-  if (options.modal) {
-    sandbox.document = { querySelector: (sel) => (sel.indexOf('aria-modal') >= 0 ? { isModal: true } : null) };
+  // DSH 弹窗（按键录制 / 设置）与 composer 的探测：只有显式提供才装 document。
+  if (options.modal || options.composer) {
+    sandbox.document = {
+      querySelector: (sel) => {
+        if (sel.indexOf('aria-modal') >= 0) return options.modal ? { isModal: true } : null;
+        if (sel.indexOf('data-conversation-region') >= 0) return options.composer || null;
+        return null;
+      }
+    };
   }
   vm.createContext(sandbox);
   vm.runInContext(clientSource, sandbox, { filename: 'dsh-vscode-keys-client.js' });
@@ -91,6 +111,7 @@ function makeEnv(options = {}) {
   const ctx = { effect: (fn) => { disposer = fn(); } };
   let disposer = null;
   if (options.shortcuts !== undefined) ctx.shortcuts = options.shortcuts;
+  if (options.conversation !== undefined) ctx.conversation = options.conversation;
 
   function apply() {
     mod.apply(ctx);
@@ -142,6 +163,7 @@ function makeEnv(options = {}) {
     keys: () => posted.filter((m) => m.type === 'key'),
     statuses: () => posted.filter((m) => m.type === 'keys-status'),
     releases: () => posted.filter((m) => m.type === 'focus-release'),
+    focusResults: () => posted.filter((m) => m.type === 'focus-input-result'),
     /** 页面里的 __dshVscodeKeys 排障句柄。 */
     debugApi: () => win.__dshVscodeKeys
   };
@@ -299,6 +321,32 @@ function makeEnv(options = {}) {
     ok(rows.length === 1 && rows[0].id === 'cmd.0', 'rows() 只列出「有绑定」的行');
     ok(rows[0].binding.code === 'Comma' && rows[0].binding.modifiers.indexOf('control') >= 0, 'rows() 保留归一化后的绑定');
     ok(debug.prefs() === '{"v":1}', 'prefs() 返回 DSH 持久化原文');
+  }
+
+  console.log('[13] focus-input：服务优先 → DOM 回退 → 失败回报');
+  {
+    const conv = makeConversation('ok');
+    const env = makeEnv({ shortcuts: makeShortcuts([]), conversation: conv });
+    env.apply();
+    env.ack();
+    env.deliverToWindow('message', { source: 'dsh-vscode-host', type: 'focus-input' });
+    ok(conv.focused.count === 1, '走 conversation.input.for(ctx).focus()');
+    ok(env.focusResults().length === 1 && env.focusResults()[0].ok === true, '回报 ok:true');
+
+    const composer = { focused: 0, caret: 0, value: '草稿', focus() { this.focused += 1; }, setSelectionRange(s, e) { this.caret = e; } };
+    const env2 = makeEnv({ shortcuts: makeShortcuts([]), conversation: makeConversation('throw'), composer });
+    env2.apply();
+    env2.ack();
+    env2.deliverToWindow('message', { source: 'dsh-vscode-host', type: 'focus-input' });
+    ok(composer.focused === 1, '会话 scope 不可用时回退到 composer DOM');
+    ok(composer.caret === 2, '光标移到草稿末尾（不覆盖已有内容）');
+    ok(env2.focusResults()[0].ok === true, '回退成功也回报 ok:true');
+
+    const env3 = makeEnv({ shortcuts: makeShortcuts([]) });
+    env3.apply();
+    env3.ack();
+    env3.deliverToWindow('message', { source: 'dsh-vscode-host', type: 'focus-input' });
+    ok(env3.focusResults().length === 1 && env3.focusResults()[0].ok === false, '无会话也无 composer 回报 ok:false');
   }
 
   console.log('\n全部通过：' + passed + ' 项断言 ✓');

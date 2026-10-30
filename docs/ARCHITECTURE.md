@@ -199,7 +199,7 @@ profile 目录：`$DSH_HOME`（默认 `~/.dsh`）`/profiles/web`；插件写入
 | `dsh-vscode-file-links` | `dsh-plugins/` 真实文件随扩展分发 | 见插件 `package.json` | 工作区文件/文件夹链接改在 VS Code 资源管理器定位/打开 |
 | `dsh-vscode-changes` | `dsh-plugins/` 真实文件随扩展分发（**仅宿主半边**） | 见插件 `package.json` | 把「某会话某轮里某文件的两侧全文」出口成一条鉴权 GET 路由（`/api/dsh-vscode.changes-file`），供轮级 diff；仅 `workspaceFileLinkAction=diffAndOpen` 时安装 |
 | `dsh-vscode-workspace` | `dsh-plugins/` 真实文件随扩展分发（客户端半边干活，宿主半边 no-op） | 见插件 `package.json` | 面板加载后把 DSH 当前工作区切到 VS Code 文件夹：`ctx.workspaces.create({path})` + `ctx.uiWorkspace.openWorkspace(id)`；`dshPanel.pinWorkspaceToVSCode=false` 时不安装 |
-| `dsh-vscode-keys` | `dsh-plugins/` 真实文件随扩展分发（客户端半边干活，宿主半边 no-op） | 见插件 `package.json` | 面板内按下的工作台级快捷键转发给宿主 `executeCommand`；每次按键前读 DSH 自己的键位目录（`ctx.shortcuts.catalog` / `fixedCatalog`）做签名比对，**命中即让位**；`dshPanel.forwardVSCodeKeys=false` 时不安装、不握手 |
+| `dsh-vscode-keys` | `dsh-plugins/` 真实文件随扩展分发（客户端半边干活，宿主半边 no-op） | 见插件 `package.json` | 面板内按下的工作台级快捷键转发给宿主 `executeCommand`；每次按键前读 DSH 自己的键位目录（`ctx.shortcuts.catalog` / `fixedCatalog`）做签名比对，**命中即让位**；同时承担 `dshPanel.focusInput` 的 `focus-input` 链路（`conversation.input.for(ctx).focus()` → composer DOM 回退）；`dshPanel.forwardVSCodeKeys` 与 `dshPanel.focusInputEnabled` 均关时才不安装 |
 
 两个与 diff 相关的插件用到的 DSH 字段（均为实测，非公开契约，结构不符即 404）：
 
@@ -298,3 +298,6 @@ webview → 宿主：{ type:'dsh-workspace-pin-unavailable' }   // 8s 内没收�
    `secondCode` 序列互相干扰）；不读用户 `keybindings.json`（Remote 下文件在客户端、扩展在服务端）；
    命中 DSH 键位目录时一律让位，用户想拿回某个键需在 DSH 快捷键面板里改绑；`F6` 交还焦点后再按 F6
    走 VS Code 自己的「切到下一部分」语义。`shortcuts` 服务缺失时降级为静态表（状态栏提示一次）。
+9. **焦点进入面板不会自动激活输入框**：`F6` / `Tab` 只把焦点交到 iframe，还需 `Ctrl+Alt+D`
+   （`dshPanel.focusInput`）再推一步。自动激活（含 F6 自锁、弹窗内不抢、只在焦点落在文档/空白时接管）
+   已登记为候选规格 `009`，**暂缓未实现**。

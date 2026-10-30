@@ -1834,6 +1834,11 @@ function buildIframeHtml(url, scale, requestedFileLinkMode, sidebar, pinPathRaw)
   // 快捷键转发：宿主把生效表编译成「物理键签名 → true」下发；页面只查表，
   // 命中后再按 DSH 的键位目录决定是否让位（DSH 优先）。关闭时下发空表 + 不回 ack。
   const keys = forwardKeysState();
+  // 页面插件是「快捷键转发」与「聚焦输入框」的共同载体：任一开启都需要握手；
+  // 转发关闭时下发空表（只保留聚焦能力）。
+  const keysEnabled = keys.enabled || focusInputEnabled();
+  const keysTable = keys.enabled ? keys.table : {};
+  const keysRelease = keys.enabled ? keys.releaseKey : null;
   const sidebarToolbarHtml = sidebarChrome
     ? '<div id="dsh-toolbar"><button id="dsh-sidebar-toggle" type="button" aria-label="隐藏 DSH 侧栏" title="隐藏 DSH 侧栏" data-hidden="false">'
       + '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1" aria-hidden="true">'
@@ -1906,9 +1911,9 @@ ${sidebarToolbarHtml}
   // 快捷键转发（spec 008）：表由宿主下发生成，页面只做签名命中；
   // 命令 id 不在页面里出现，页面无法要求宿主执行任意命令。
   var KEYS_ID = ${jsonForScript(KEYS_PLUGIN_SOURCE)};
-  var keysEnabled = ${jsonForScript(keys.enabled)};
-  var keysTable = ${jsonForScript(keys.table)};
-  var keysRelease = ${jsonForScript(keys.releaseKey)};
+  var keysEnabled = ${jsonForScript(keysEnabled)};
+  var keysTable = ${jsonForScript(keysTable)};
+  var keysRelease = ${jsonForScript(keysRelease)};
   var PIN_TIMEOUT_MS = ${WORKSPACE_PIN_TIMEOUT_MS};
   var PIN_REASON_MAX = ${WORKSPACE_PIN_REASON_MAX};
   // 侧栏策略：override（用户手动）> policy（配置）> 宽度自适应（与 DSH 的 1024 断点一致）。
@@ -2243,6 +2248,11 @@ ${sidebarToolbarHtml}
         vscode.postMessage({ type: 'dsh-focus-released' });
         return;
       }
+      if (data.type === 'focus-input-result') {
+        // 页面插件已尝试把光标放进输入框（或明确告知找不到）。
+        vscode.postMessage({ type: 'dsh-focus-input-result', ok: data.ok === true });
+        return;
+      }
       if (data.type === 'keys-status') {
         vscode.postMessage(normalizeKeysReport(data));
       }
@@ -2292,6 +2302,10 @@ ${sidebarToolbarHtml}
     } else if (data.type === 'dsh-sidebar-toggle') {
       // 宿主命令 / 快捷键：与点按钮等价（同样算用户意图，需要持久化）。
       setHidden(!hidden, 'user');
+    } else if (data.type === 'dsh-focus-input') {
+      // 显式命令（dshPanel.focusInput）：先把焦点推进 iframe，再让页面插件把光标放进 composer。
+      try { if (frame && typeof frame.focus === 'function') frame.focus(); } catch (e) { /* ignore */ }
+      postToFrame({ source: HOST_ID, type: 'focus-input' });
     } else if (data.type === 'dsh-keys-config') {
       // 配置热更新：换表并重发 keys-ack，不重载 iframe（DSH 对话与输入不丢）。
       keysEnabled = data.enabled === true;
@@ -2431,6 +2445,14 @@ const FORWARD_COMMAND_ID = /^[a-z][a-zA-Z0-9_.-]*$/;
 // 物理键签名：`<code>|<ctrl>|<meta>|<alt>|<shift>`，0/1 表示是否按下。
 // 页面插件与宿主必须用同一格式（dsh-vscode-keys 的 signatureOf 与这里逐字一致）。
 const GESTURE_SIGNATURE = /^[A-Za-z][A-Za-z0-9]{0,15}\|[01]\|[01]\|[01]\|[01]$/;
+// 「聚焦 DSH 输入框」：显式命令 + 默认可关的快捷键（与快捷键转发共用页面插件）。
+// VS Code 不允许扩展动态注册键位，所以「关闭」用 when 子句（context key）实现：
+// 关闭后该组合彻底不生效（不占用户的键），而不是「按了没反应」。
+const FOCUS_INPUT_KEY = 'dshPanel.focusInputEnabled';
+const FOCUS_INPUT_CONTEXT = 'dshPanelFocusInput';
+const FOCUS_INPUT_TIMEOUT_MS = 1200;
+// 打开视图容器后等 webview 解析的上限（每条打开命令一次）。
+const FOCUS_INPUT_OPEN_TIMEOUT_MS = 1500;
 // 默认转发表：只放「工作台级」命令。编辑器级命令（撤销/注释/移动行…）一律不放，
 // 否则会把焦点抢去编辑器。DSH 已占用的组合不会被抢：页面侧按 DSH 的键位目录逐键让位。
 const DEFAULT_FORWARD_KEYS = [
@@ -2509,6 +2531,14 @@ const forwardFailureNotified = new Set();
 const forwardUnknownNotified = new Set();
 /** 页面回报的运行时状态（降级 / 让位清单），供 dshPanel.keyStatus 展示。 */
 let keysRuntimeStatus = null;
+/** 「聚焦 DSH 输入框」的在途请求：页面回执 / 超时只结算一次。 */
+let focusInputWaiter = null;
+/** 最近一次自动打开面板尝试过、且命令存在的 id（用于失败提示）。 */
+let lastOpenAttempted = [];
+/** 最近一次自动打开面板的候选命令（排障用）。 */
+let lastOpenCandidates = [];
+/** 最近一次成功打开面板所用的命令 id（排障用，keyStatus 会展示）。 */
+let lastOpenSucceeded = '';
 let dshModelDriftChecked = false;
 
 function dshHomeDir() {
@@ -3163,6 +3193,186 @@ function shouldForwardVSCodeKeys() {
   return cfg().get(FORWARD_KEYS_KEY, true) !== false;
 }
 
+/** 是否贡献「聚焦 DSH 输入框」的默认快捷键（`dshPanel.focusInputEnabled`，默认开）。 */
+function focusInputEnabled() {
+  return cfg().get(FOCUS_INPUT_KEY, true) !== false;
+}
+
+/**
+ * 把开关同步成 when 上下文（`dshPanelFocusInput`）。
+ * 关闭时默认键位彻底失效，不占用用户的组合；而不是「按了但没反应」。
+ */
+function syncFocusInputContext() {
+  try {
+    if (!vscode.commands || typeof vscode.commands.executeCommand !== 'function') return Promise.resolve();
+    return Promise.resolve(vscode.commands.executeCommand('setContext', FOCUS_INPUT_CONTEXT, focusInputEnabled()))
+      .then(() => {}, () => {});
+  } catch {
+    return Promise.resolve();
+  }
+}
+
+/** 等面板就绪：打开视图容器后，webview 是异步解析出来的。 */
+function waitForPanel(timeoutMs, findView) {
+  const read = typeof findView === 'function' ? findView : () => activeTab || activeView;
+  return new Promise((resolve) => {
+    const started = Date.now();
+    const tick = () => {
+      const target = read();
+      if (target) return resolve(target);
+      if (Date.now() - started >= timeoutMs) return resolve(null);
+      setTimeout(tick, 100);
+    };
+    tick();
+  });
+}
+
+/** 最近一次成功打开面板所用的命令 id（排障 / 测试用）。 */
+function lastOpenedWith() {
+  return lastOpenSucceeded;
+}
+
+/**
+ * 待尝试的「打开 DSH 视图」命令，按精确度排序：
+ * 1. `<viewId>.focus` —— VS Code 为每个视图生成的聚焦命令（最精确）；
+ * 2. `workbench.view.extension.<容器 id>` —— 切到活动栏容器；
+ * 3. `getCommands()` 里探测到的其它 `workbench.view.extension.*dsh*`（不同版本可能带命名空间）。
+ * 注：不使用 `workbench.action.openView`——它打开的是视图选择器，会把焦点抬走。
+ * @returns {Promise<string[]>}
+ */
+async function resolveContainerCommands() {
+  const known = [VIEW_ID + '.focus', 'workbench.view.extension.dsh-panel'];
+  let discovered = [];
+  try {
+    const all = await vscode.commands.getCommands(true);
+    discovered = (Array.isArray(all) ? all : [])
+      .filter((id) => typeof id === 'string' && /dsh/i.test(id))
+      .filter((id) => /^workbench\.view\.extension\./.test(id) || /\.focus$/.test(id))
+      .filter((id) => known.indexOf(id) === -1);
+  } catch { /* getCommands 不可用：只用已知候选 */ }
+  return known.concat(discovered);
+}
+
+/**
+ * 打开并验证 DSH 视图。
+ * 注意：「命令 resolve 成功」不等于「视图已经切过去」——必须用 `activeView` 真的解析出来
+ * 作为成功信号。另外 **不能** 用 `workbench.action.openView` 兜底：它弹出的是视图选择器
+ * （会把焦点抬走并要求用户再选一次），比什么都不做更差。
+ * @param {number} [timeoutMs] 每条命令后的等待上限（测试用短值）
+ * @param {() => object|null} [findView] 取当前视图（测试可注入）
+ * @returns {Promise<object|null>} 解析出的视图，失败返回 null
+ */
+async function openDshPanel(timeoutMs, findView) {
+  const wait = timeoutMs && timeoutMs > 0 ? timeoutMs : FOCUS_INPUT_OPEN_TIMEOUT_MS;
+  const commands = await resolveContainerCommands();
+  const tried = [];
+  lastOpenCandidates = commands;
+  for (const cmd of commands) {
+    let failed = false;
+    try {
+      await vscode.commands.executeCommand(cmd);
+      tried.push(cmd);
+    } catch {
+      failed = true;
+    }
+    if (failed) continue; // 命令不存在：换下一条
+    const view = await waitForPanel(wait, findView);
+    if (view) {
+      // 记下真正生效的那条：不同 VS Code 环境的可用命令不一样（真机实测
+      // `workbench.view.extension.*` 能 resolve 但不切换，`<viewId>.focus` 才生效）。
+      lastOpenSucceeded = cmd;
+      return view;
+    }
+  }
+  lastOpenAttempted = tried;
+  return null;
+}
+
+/** 简单延迟（等新创建的 webview 页面开始监听）。 */
+function delay(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
+ * 请面板把光标放进 DSH 输入框：中继 → 页面插件（服务优先 / DOM 回退）。
+ * 页面没回执（插件未生效）时超时返回 false，由调用方给可见提示。
+ * @param {{webview?: {postMessage: Function}}} target
+ * @param {number} [timeoutMs]
+ * @returns {Promise<boolean>}
+ */
+function requestInputFocus(target, timeoutMs) {
+  const webview = target && target.webview;
+  if (!webview || typeof webview.postMessage !== 'function') return Promise.resolve(false);
+  return new Promise((resolve) => {
+    let settled = false;
+    let timer = null;
+    const finish = (ok) => {
+      if (settled) return;
+      settled = true;
+      if (timer !== null) clearTimeout(timer);
+      if (focusInputWaiter === entry) focusInputWaiter = null;
+      resolve(ok);
+    };
+    const entry = { ok: () => finish(true), fail: () => finish(false) };
+    // 上一笔未结算的先失败掉，避免一个永不回应的面板把后续请求挂死。
+    if (focusInputWaiter && focusInputWaiter !== entry) focusInputWaiter.fail();
+    focusInputWaiter = entry;
+    timer = setTimeout(() => finish(false), timeoutMs && timeoutMs > 0 ? timeoutMs : FOCUS_INPUT_TIMEOUT_MS);
+    try {
+      const posted = webview.postMessage({ type: 'dsh-focus-input' });
+      if (posted && typeof posted.then === 'function') posted.then(() => {}, () => finish(false));
+    } catch {
+      finish(false);
+    }
+  });
+}
+
+/** 命令 dshPanel.focusInput：切到面板并把光标放进 DSH 输入框。 */
+async function focusDshInput(openTimeoutMs) {
+  let target = activeTab || activeView;
+  let justOpened = false;
+  if (!target) {
+    // 面板从未打开：先用容器命令切过去，再用「activeView 真的出现」验证成功。
+    target = await openDshPanel(openTimeoutMs);
+    justOpened = true;
+    if (!target) {
+      // 把尝试过的命令写进提示：不同 VS Code 环境可用的打开命令不一样，看不清就无法排障。
+      const tried = lastOpenAttempted.length > 0 ? lastOpenAttempted.slice(0, 3).join('、') : '无（命令均不存在）';
+      vscode.window.showWarningMessage(
+        `未能自动打开 DSH 面板（已尝试：${tried}）。请在命令面板执行「View: Open View」选择 DeepSeek Harness，或直接点击活动栏图标。`
+      );
+      return;
+    }
+  }
+  if (activeTab === target) {
+    // 标签页：reveal 到当前列并拿走焦点（preserveFocus=false）。
+    try { target.reveal(target.viewColumn, false); } catch { /* 面板已销毁 */ }
+  } else if (typeof target.show === 'function') {
+    // 侧边栏视图：show(false) 才会把焦点给视图；show(true) 只展开、焦点仍在编辑器。
+    try {
+      await target.show(false);
+    } catch (e) {
+      // 不吞错：视图已销毁/容器被移走时，用户必须知道下一步干什么。
+      statusBarMsg('显示 DSH 面板失败：' + (e && e.message ? e.message : '未知错误') + '；请直接点击活动栏图标。', 8000);
+      return;
+    }
+  } else {
+    // 旧版 VS Code 没有 WebviewView.show：只能依赖容器命令，失败要说清楚（不静默）。
+    statusBarMsg('当前 VS Code 版本不支持自动聚焦面板视图，请手动点击侧边栏面板后再输入。', 8000);
+    return;
+  }
+  // 刚创建的 webview 页面可能还没开始监听：给它一拍，没回执再重试一次。
+  if (justOpened) await delay(250);
+  let ok = await requestInputFocus(target, FOCUS_INPUT_TIMEOUT_MS);
+  if (!ok && justOpened) {
+    await delay(400);
+    ok = await requestInputFocus(target, FOCUS_INPUT_TIMEOUT_MS);
+  }
+  if (!ok) {
+    statusBarMsg('已切到 DSH 面板，但没能激活输入框（插件可能未生效：可点面板「重启 dsh web」后重试）。', 8000);
+  }
+}
+
 /** 组合键主键 → DOM e.code；无法识别返回 null。 */
 function keyToCode(key) {
   if (typeof key !== 'string' || key === '') return null;
@@ -3461,13 +3671,19 @@ function pushForwardKeysConfig() {
   if (!target) return;
   const state = forwardKeysState();
   try {
-    target.webview.postMessage({ type: 'dsh-keys-config', enabled: state.enabled, table: state.table, releaseKey: state.releaseKey });
+    target.webview.postMessage({
+      type: 'dsh-keys-config',
+      // 转发关掉、但聚焦输入框还开着：仍然握手（空表），否则进面板就无法聚焦。
+      enabled: state.enabled || focusInputEnabled(),
+      table: state.enabled ? state.table : {},
+      releaseKey: state.enabled ? state.releaseKey : null
+    });
   } catch { /* 面板已销毁：忽略 */ }
 }
 
-/** 是否安装内置快捷键转发插件（`dshPanel.forwardVSCodeKeys`，默认开）。 */
+/** 是否安装内置快捷键转发插件（转发或聚焦输入框任一开启就需要它）。 */
 function shouldInstallKeysPlugin() {
-  return shouldForwardVSCodeKeys();
+  return shouldForwardVSCodeKeys() || focusInputEnabled();
 }
 
 /**
@@ -3575,6 +3791,9 @@ async function showKeyStatus() {
   } else {
     push('$(check) 快捷键转发生效中', `焦点交还：${state.releaseCombo || '已关闭'}`, 'noop');
   }
+  if (lastOpenSucceeded) {
+    push('$(plug) 面板打开方式：' + lastOpenSucceeded, '最近一次自动打开面板所用的命令（排障：不同 VS Code 环境可用的命令不同）', 'noop');
+  }
   sep('生效中');
   if (state.built.active.length === 0) push('（无）', '', 'noop');
   for (const item of state.built.active) {
@@ -3594,6 +3813,7 @@ async function showKeyStatus() {
   else for (const row of status.shadowed) push(row.combo, `DSH 已占用：${row.command || '（未知）'}`, 'noop');
   sep('操作');
   push('$(add) 添加转发键…', '选择组合键与命令，写入用户设置，立即生效', 'add');
+  push('$(keyboard) 修改「聚焦 DSH 输入框」快捷键', '在键盘快捷方式里搜索 dshPanel.focusInput（默认 Ctrl+Shift+J）', 'keybindings');
   push('$(clippy) 复制为 Markdown', '把四类清单贴到 issue / 文档', 'copy');
   push('$(gear) 打开设置', FORWARD_MAP_KEY, 'settings');
 
@@ -3604,6 +3824,11 @@ async function showKeyStatus() {
   });
   if (!picked || !picked.action || picked.action === 'noop') return;
   if (picked.action === 'add') return addForwardKey(platform);
+  if (picked.action === 'keybindings') {
+    // VS Code 不允许扩展动态注册键位：改键就走官方 UI（搜到我们的命令即可，立即生效）。
+    vscode.commands.executeCommand('workbench.action.openGlobalKeybindings', 'dshPanel.focusInput');
+    return;
+  }
   if (picked.action === 'settings') {
     vscode.commands.executeCommand('workbench.action.openSettings', FORWARD_MAP_KEY);
     return;
@@ -4303,6 +4528,12 @@ function handleWebviewMessage(msg, webview) {
         keysDegradedNotified = true;
         statusBarMsg('快捷键转发处于降级模式：无法读取 DSH 键位表，可能与 DSH 快捷键冲突。', 8000);
       }
+    }
+  } else if (msg && msg.type === 'dsh-focus-input-result') {
+    // 页面插件已尝试（或明确告知找不到输入框）：结算在途请求，避免等满超时。
+    if (focusInputWaiter) {
+      if (msg.ok === true) focusInputWaiter.ok();
+      else focusInputWaiter.fail();
     }
   } else if (msg && msg.type === 'dsh-workspace-pin-result' && msg.status !== 'done' && msg.status !== 'already') {
     // 切换失败 / 旧版 dsh：必须让用户看见，并给出下一步（禁止静默降级）。
@@ -6013,6 +6244,12 @@ function activate(context) {
   gContext = context;
   registerDshModelProvider(context);
 
+  // 「聚焦 DSH 输入框」的默认键位开关：只影响 when 上下文（键位是否生效），不影响命令本身。
+  syncFocusInputContext();
+  context.subscriptions.push(vscode.workspace.onDidChangeConfiguration((e) => {
+    if (e.affectsConfiguration(FOCUS_INPUT_KEY)) syncFocusInputContext();
+  }));
+
   const provider = {
     resolveWebviewView(view) {
       activeView = view;
@@ -6255,6 +6492,11 @@ function activate(context) {
     showKeyStatus().catch((e) => vscode.window.showErrorMessage('查看快捷键转发失败：' + (e && e.message ? e.message : String(e))));
   });
 
+  // 从编辑器一键跳回 DSH 输入框（008 的反向环路；F6 出去后用它回来）。
+  const focusInputCmd = vscode.commands.registerCommand('dshPanel.focusInput', () => {
+    focusDshInput().catch((e) => vscode.window.showErrorMessage('聚焦 DSH 输入框失败：' + (e && e.message ? e.message : String(e))));
+  });
+
   // 切换 DSH 侧栏显示：与面板顶部按钮等价，供命令面板 / 快捷键使用。
   const toggleDshSidebarCmd = vscode.commands.registerCommand('dshPanel.toggleDshSidebar', () => {
     const target = activeTab || activeView;
@@ -6310,6 +6552,16 @@ module.exports.__internals = {
   shouldForwardVSCodeKeys,
   shouldInstallKeysPlugin,
   ensureKeysPlugin,
+  focusInputEnabled,
+  syncFocusInputContext,
+  focusDshInput,
+  openDshPanel,
+  resolveContainerCommands,
+  lastOpenedWith,
+  requestInputFocus,
+  FOCUS_INPUT_KEY,
+  FOCUS_INPUT_CONTEXT,
+  FOCUS_INPUT_TIMEOUT_MS,
   forwardKeysState,
   buildForwardTable,
   parseForwardKeybindings,

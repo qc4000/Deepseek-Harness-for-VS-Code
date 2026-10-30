@@ -84,6 +84,16 @@ DSH 侧已有快捷键注册表 `@deepseek-ai/dsh-client-shortcuts`（cordis 服
   不挂 keydown、不改变任何行为。
 - **AC-12**：Given DSH 页面上有打开的弹窗（`[aria-modal="true"]`，典型：快捷键设置的「按键录制」），
   When 用户按键，Then 插件不拦截、不转发（把键盘完整还给页面），避免抢掉 DSH 自己的按键录制。
+- **AC-13**：Given 焦点在编辑器且面板已加载，When 执行 `dshPanel.focusInput`，Then 视图先按 `show(false)` /
+  `reveal(col, false)` 获得焦点，再向 webview 发 `dsh-focus-input`；页面回执 `ok:true` 时不打扰用户。
+  Given 面板从未打开，Then 按 `<viewId>.focus` → `workbench.view.extension.<容器 id>` → `getCommands()` 探测
+  这个顺序尝试，以「视图真的解析出来」为成功信号；**不得**用 `workbench.action.openView` 兜底（它弹出视图选择器）；
+  仍失败时提示里带上实际尝试过的命令 id（便于定位环境差异）。
+- **AC-14**：Given `dshPanel.focusInputEnabled=false`，Then 默认键位 `Ctrl+Shift+J` / `⇧⌘J` 彻底不生效
+  （`when: dshPanelFocusInput` 为 false，`setContext` 同步），命令本身仍可从命令面板调用。
+  默认值不得含 `Alt`（终端把它当 AltGr 字符输入）且不得碰 Linux 桌面的「显示桌面」组合。
+- **AC-15**：Given 页面 1.2s 内没回执（插件未生效），When 执行该命令，Then 状态栏提示一次并指出
+  「点重启 dsh web 后重试」，**不静默**。
 
 ## 6. 兼容矩阵
 
@@ -136,9 +146,9 @@ DSH 侧已有快捷键注册表 `@deepseek-ai/dsh-client-shortcuts`（cordis 服
 
 | 日期 | 方式 | 结论 |
 | --- | --- | --- |
-| 2026-10-29 | `npm test`（`key-bridge` 75 项 + `key-bridge-client` 49 项，共 21 套 / 870 项） | 通过 |
+| 2026-10-29 | `npm test`（`key-bridge` 103 项 + `key-bridge-client` 55 项，共 21 套 / 904 项） | 通过 |
 | 2026-10-29 | `npm run test:all`（e2e） | 不适用（不涉及 DSH RPC 契约；DSH `shortcuts` 目录由 L3 仿真覆盖） |
-| — | 实机 F5 | 待验证：Windows / macOS / Linux 各一次（重点：两批键逐条、`Ctrl+Shift+F` 仍是 DSH fork、`Ctrl+\`` 仍是 DSH 终端、F6 交还后自定义键位可用） |
+| 2026-10-30 | 实机 F5（Linux 本地，VS Code 当前稳定版，1.0.6-dev.10） | 通过：面板关着时按 `Ctrl+Shift+J` 能打开并聚焦输入框；生效命令为 `dsh.webview.focus`（`workbench.view.extension.dsh-panel` 能 resolve 但不切换） |
 | 2026-10-29 | 实机 F5（Linux 本地，dsh 0.2.1-rc.2，1.0.6-dev.5） | 通过：命中 DSH 目录即让位（`Ctrl+/` 仍打开 DSH 快捷键面板，`__dshVscodeKeys.owner('Slash|1|0|0|0')` 返回命令 id）；`Ctrl+Shift+,` 因 DSH 无 `web:linux` 默认绑定而被转发（预期行为）；转发表与 F6 主链路可用 |
 
 ## 11. 变更历史
@@ -149,3 +159,9 @@ DSH 侧已有快捷键注册表 `@deepseek-ai/dsh-client-shortcuts`（cordis 服
 | 2026-10-29 | 去掉 `true` 自动解析与键位镜像表 | 用户决策：只接受命令 id 或 `false` |
 | 2026-10-29 | 插件 0.2.0：弹窗内不抢键 + 排障 API | 真机反馈「在 DSH 里绑键时我们的转发抢走了按键」与「改绑后看不出是否让位」 |
 | 2026-10-29 | 插件 0.2.1：排障 API 扩到 `rows()` / `prefs()` | 真机排查「改绑后仍无让位」时需看到 DSH 实际持久化的绑定与 profile |
+| 2026-10-29 | 新增 `dshPanel.focusInput` + `dshPanel.focusInputEnabled`（插件 0.3.0） | 反向环路：F6 交还焦点后一键跳回输入框；焦点入面板自动激活列为候选规格 009 |
+| 2026-10-29 | 默认键位 `Ctrl+Alt+D` 改为 `Ctrl+Shift+J` | 真机反馈：`Ctrl+Alt+D` 被 Linux 桌面「显示桌面」抢走；`Ctrl+Shift+Alt+D` 在终端里被当 AltGr 字符输入而失效 |
+| 2026-10-29 | 面板未打开时的打开逻辑加验证与兜底 | 真机反馈：按快捷键只展开侧栏、停在别的视图（容器命令不报错但不生效） |
+| 2026-10-29 | 容器命令改为 `getCommands()` 探测；移除 openView 兜底 | 真机反馈：兜底会弹出视图选择器（截图确认），且硬编码容器 id 可能猜不中 |
+| 2026-10-30 | 首选 `<viewId>.focus`，容器命令降为第二候选；失败提示列出已试命令 | 真机反馈：容器已固定但容器命令仍不切换（环境差异），需更精确的视图级命令与可诊断输出 |
+| 2026-10-30 | 记录「实际生效的打开命令」并在 `keyStatus` 展示 | 真机确认：`dsh.webview.focus` 生效、`workbench.view.extension.dsh-panel` 能 resolve 但不切换 |

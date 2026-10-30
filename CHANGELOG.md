@@ -10,6 +10,8 @@
 - **与 DSH 零冲突**：每次按键前读 DSH 自己的键位目录（`ctx.shortcuts.catalog` / `fixedCatalog`，含用户改绑后的结果），命中即让位——`Ctrl/Cmd+Shift+F` 仍是 DSH 的 fork 会话、`Ctrl/Cmd+\`` 仍是 DSH 的终端；在 DSH 快捷键面板（`Ctrl/Cmd+/`）改绑后让位判定立即跟随，不需重启。
 - **F6 交还焦点（默认开启）**：交还后可用任意自定义键位与两段式快捷键；办完事点一下面板即回到 DSH。
 - **可见、可改**：命令 `DeepSeek Harness: 查看快捷键转发` 列出「生效中 / 已禁用 / 因 DSH 占用而让位」三类清单，并可直接添加/禁用（写入用户设置，立即生效）或复制为 Markdown。新增 `dshPanel.forwardVSCodeKeys`（默认 `true`）、`dshPanel.forwardKeybindings`、`dshPanel.focusReleaseKey`。
+- **从编辑器跳回输入框**：新增命令 `dshPanel.focusInput`（默认 `Ctrl+Shift+J`，macOS `⇧⌘J`）：面板未打开时先打开，再把光标直接放进 DSH 输入框（光标停在草稿末尾）；与 `F6` 一出一进。默认键位避开会与 Linux 桌面「显示桌面」冲突的 `Ctrl+Alt+D`，也不带 `Alt`（带 Alt 的组合在终端里会被当 AltGr 字符输入、进不到 workbench）。`dshPanel.focusInputEnabled=false` 可让该键位彻底失效（不占用你的组合，命令仍可调用）；换组合请在「键盘快捷方式」里搜 `dshPanel.focusInput`（VS Code 不支持扩展动态注册键位）。页面侧优先 `conversation.input.for(ctx).focus()`，不可用时按 composer 区域的输入控件回退，都失败则状态栏提示（不静默）。
+- **面板没打开时也能一键到位**：面板未打开时按 `<视图 id>.focus` → `workbench.view.extension.<容器 id>` → `getCommands()` 探测 这个顺序尝试，并以「视图真的解析出来」作为成功信号；**不使用 `workbench.action.openView`**（它弹的是视图选择器）。仍失败时提示里列出实际尝试过的命令 id，便于定位环境差异。刚创建的 webview 会等一拍（250ms）并无回执时重试一次。
 - **不抢 DSH 弹窗里的按键**：DSH 的快捷键设置（按键录制）、审批等弹窗打开时插件完全不接管键盘（`dsh-vscode-keys` 0.2.0），否则录制 `Ctrl+Shift+,` 这类键会被转发走。
 - **排障接口**：面板 DevTools 里 `__dshVscodeKeys.status()` / `.bindings()` / `.owner('Comma|1|0|0|1')` / `.rows()` / `.prefs()` / `.refresh()` 可查看「我们认定的 DSH 键位」、DSH 实际绑定与持久化原文（`dsh.keybindings.v1`），便于确认「到底有没有让位」。
 - 不支持两段式（`ctrl+k ctrl+s`），也不读用户 `keybindings.json`（Remote 下文件在客户端、扩展在服务端）；配置里的非法条目逐条忽略并一次性提示；命令不存在时状态栏提示一次并指出检查位置。
@@ -25,13 +27,14 @@
 
 **测试**
 
-- 新增 `test/key-bridge.test.js`（75 项）：`normalizeCombo` 三平台展开与 chord/无修饰键拒绝、配置逐条校验与 64 条上限、默认表合并与禁用、`vm` 真跑中继（`keys-ack`、gesture 白名单、F6 交还焦点、配置热更新）、宿主只按自己的表执行命令与失败提示只一次。
-- 新增 `test/key-bridge-client.test.js`（49 项）：插件客户端仿真（未握手不介入、只上报物理键事实、DSH 目录让位与订阅跟随、降级仍转发、DSH 弹窗内不抢键、排障 API、IME/长按/页面已处理不拦、独立浏览器不介入）。
+- 新增 `test/key-bridge.test.js`（96 项）：`normalizeCombo` 三平台展开与 chord/无修饰键拒绝、配置逐条校验与 64 条上限、默认表合并与禁用、`vm` 真跑中继（`keys-ack`、gesture 白名单、F6 交还焦点、配置热更新、`focus-input` 链路）、宿主只按自己的表执行命令与失败提示只一次、`requestInputFocus` 回执/超时/抢占、面板未打开时的打开兜底与可操作提示、贡献点与 `setContext` 同步。
+- 新增 `test/key-bridge-client.test.js`（55 项）：插件客户端仿真（未握手不介入、只上报物理键事实、DSH 目录让位与订阅跟随、降级仍转发、DSH 弹窗内不抢键、排障 API、`focus-input` 服务→DOM→失败三级、IME/长按/页面已处理不拦、独立浏览器不介入）。
 - 同步上游测试：新增 `desktop-app-support`、`remote-auth-proxy`、`open-external-plugin` 三套，重写 `remote-mode` 断言。
 - 新增 `test/clipboard-bridge.test.js`（16 项）：中继转发与 origin/source 双校验、超长拒绝与回执、宿主写入成功/失败、失败提示只一次。
 - `test/clipboard-plugin.test.js` 扩到 42 项：新增客户端仿真（原生成功不发消息、原生被拒走宿主、无回执/`ok:false` 走 `execCommand`、非 iframe 不接管、未知 token 忽略）。合并上游后全量 19 套 / 746 项断言。
 - 规格：[007-webview-clipboard-copy](docs/sdd/specs/007-webview-clipboard-copy/spec.md)。
 - 规格：[008-webview-keybridge](docs/sdd/specs/008-webview-keybridge/spec.md)。
+- 候选规格：[009-auto-focus-on-enter](docs/sdd/specs/009-auto-focus-on-enter/spec.md)（草稿，暂缓：焦点进入面板时自动激活输入框）。
 
 ## 1.0.5
 

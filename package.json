@@ -109,6 +109,11 @@
           "default": "F6",
           "markdownDescription": "面板内把焦点交还 VS Code 的按键（默认 `F6`）。按下后焦点离开 DSH 页面，之后可以使用任意自定义键位与两段式快捷键；按完回到 DSH 请点击面板。置空字符串可关闭该行为（不影响快捷键转发）。"
         },
+        "dshPanel.focusInputEnabled": {
+          "type": "boolean",
+          "default": true,
+          "markdownDescription": "是否为「聚焦 DSH 输入框」提供默认快捷键 `Ctrl+Shift+J`（macOS 为 `⇧⌘J`）。关闭后该组合彻底不生效、不会占用你的按键，命令本身仍可从命令面板调用；想换成其它组合请在「键盘快捷方式」里搜索 `dshPanel.focusInput` 后修改（扩展不支持动态注册键位）。\n\n注意：带 `Alt` 的组合在终端（底部面板）里会被当作 AltGr 字符输入，可能按不出来；若自定义后也遇到底部面板不响应，把命令加进 `terminal.integrated.commandsToSkipShell` 即可。"
+        },
         "dshPanel.workspaceFileLinkAction": {
           "type": "string",
           "default": "revealAndOpen",
@@ -265,12 +270,24 @@
         "title": "DeepSeek Harness: 查看快捷键转发"
       },
       {
+        "command": "dshPanel.focusInput",
+        "title": "DeepSeek Harness: 聚焦 DSH 输入框"
+      },
+      {
         "command": "dshPanel.toggleDshSidebar",
         "title": "DeepSeek Harness: 切换 DSH 侧栏显示"
       },
       {
         "command": "dshPanel.diagnoseModels",
         "title": "DeepSeek Harness: 诊断 DSH 模型注册表"
+      }
+    ],
+    "keybindings": [
+      {
+        "command": "dshPanel.focusInput",
+        "key": "ctrl+shift+j",
+        "mac": "cmd+shift+j",
+        "when": "dshPanelFocusInput"
       }
     ],
     "menus": {

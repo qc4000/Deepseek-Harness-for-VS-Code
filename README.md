@@ -86,7 +86,8 @@
 | `dshPanel.dshSidebar` | `auto` | DSH 左侧栏显示策略：`auto` 窄面板（<1024px）自动隐藏、宽面板显示 / `show` 始终显示（等同关闭本能力）/ `hide` 始终隐藏；顶部工具条可随时手动切换，修改本配置会清除手动切换 |
 | `dshPanel.forwardVSCodeKeys` | `true` | 面板内焦点时转发 VS Code 快捷键（自动安装配套插件 `dsh-vscode-keys`）。转发前先查 DSH 自己的键位表，命中即让位，不会抢 DSH 的快捷键；关闭后不安装插件、不监听按键，行为与本能力不存在时完全一致 |
 | `dshPanel.forwardKeybindings` | `{}` | 在默认转发表之上增删按键：值写命令 id 表示转发（也可覆盖默认），写 `false` 表示永不拦截。不支持两段式（`ctrl+k ctrl+s`）；无修饰键的单键不会被拦截（会破坏输入框） |
-| `dshPanel.focusReleaseKey` | `F6` | 把焦点交还 VS Code 的按键。按下后可使用任意自定义键位与两段式快捷键，办完事点一下面板回到 DSH；置空字符串可关闭（不影响快捷键转发） |
+| `dshPanel.focusReleaseKey` | `F6` | 把焦点交还 VS Code 的按键。按下后可使用任意自定义键位与两段式快捷键，办完事按 `Ctrl+Shift+J`（macOS `⇧⌘J`）直接跳回输入框；置空字符串可关闭（不影响快捷键转发） |
+| `dshPanel.focusInputEnabled` | `true` | 是否为「聚焦 DSH 输入框」提供默认键位 `Ctrl+Shift+J`（macOS `⇧⌘J`）。关闭后该组合彻底不生效（不占用你的按键），命令本身仍可在命令面板调用；换组合请在「键盘快捷方式」里搜 `dshPanel.focusInput` |
 
 ### 面板内快捷键转发（v1.0.6 起）
 
@@ -122,6 +123,22 @@
 
 键名 = 修饰键（`mod`/`ctrl`/`meta`/`alt`/`shift`）+ 一个主键（字母、数字、`f1`–`f24`，或 `backquote`、
 `comma` 这类 code 名）；必须带修饰键，不支持两段式。命令 id 可在命令面板里右键「复制命令 ID」获得。
+
+**从编辑器跳回输入框**：`Ctrl+Shift+J`（macOS `⇧⌘J`）或命令 `DeepSeek Harness: 聚焦 DSH 输入框`——
+面板未打开时会先打开它（用 VS Code 的视图级命令 `<view id>.focus`，容器命令在部分环境只 resolve 不切换），
+然后把光标直接放进 DSH 的输入框（光标停在草稿末尾）。与 `F6` 正好一出一进：
+`F6` 出去用 VS Code 的任意键位，`Ctrl+Shift+J` 回来接着写。
+- 不想占用这个组合：`dshPanel.focusInputEnabled = false`（键位彻底失效，不阻塞你另绑的键）；
+- 想换成别的组合：去「键盘快捷方式」搜 `dshPanel.focusInput` 改——扩展不支持动态注册键位，
+  所以改键走 VS Code 自己的 UI（也可以从「查看快捷键转发」菜单里一键打开）。
+- **选组合的两个坑**（真机踩过）：
+  1. `Ctrl+Alt+D` 这类组合会被 Linux 桌面当「显示桌面」抢走；
+  2. **带 `Alt` 的组合在底部面板（终端）里会被当作 AltGr 字符输入**，按键进不到 workbench。
+  所以默认用了不带 Alt 的 `Ctrl+Shift+J`。自己改键后若在终端里仍不响应，把命令加进白名单：
+  ```jsonc
+  // settings.json
+  "terminal.integrated.commandsToSkipShell": ["dshPanel.focusInput"]
+  ```
 
 > 已知限制：不支持两段式；不读你的 `keybindings.json`（远程场景下它在客户端，扩展在服务端）；
 > 焦点交还后再按 `F6` 会按 VS Code 自己的「切到下一部分」语义继续移动焦点。
