@@ -317,11 +317,13 @@ function makeRealm() {
   console.log('[11] 宿主：只按自己的表执行命令');
   {
     const before = executed.length;
-    I.handleWebviewMessage({ type: 'dsh-forwarded-key', gesture: { code: 'KeyP', ctrl: true, meta: false, alt: false, shift: true } });
+    // 用当前平台的 `mod` 展开结果构造 gesture：macOS 是 meta+shift，其余是 ctrl+shift。
+    const panelGesture = I.comboToGesture('mod+shift+p', PLATFORM);
+    I.handleWebviewMessage({ type: 'dsh-forwarded-key', gesture: Object.assign({}, panelGesture) });
     await flush();
     ok(executed.length === before + 1 && executed[executed.length - 1] === 'workbench.action.showCommands', 'mod+shift+p → 命令面板');
 
-    I.handleWebviewMessage({ type: 'dsh-forwarded-key', gesture: { code: 'KeyP', ctrl: true, meta: false, alt: false, shift: true, command: 'workbench.action.files.save' } });
+    I.handleWebviewMessage({ type: 'dsh-forwarded-key', gesture: Object.assign({ command: 'workbench.action.files.save' }, panelGesture) });
     await flush();
     ok(executed.length === before + 1, '夹带 command 的 gesture 不执行（AC-6）');
 
