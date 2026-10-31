@@ -1,7 +1,7 @@
 {
   "name": "dsh-vscode-changes",
-  "version": "0.2.3",
-  "description": "DeepSeek Harness 插件（仅宿主半边）：把每个轮开始/结束时的两侧文件内容出口成一条鉴权路由，供 Deepseek-Harness-for-VS-Code 扩展在 VS Code 里渲染并排 diff。数据取自 @deepseek-ai/dsh-workspace-changes 的会话记录；两侧全文由插件用公开钩子（fs/write-intent + turn/end）自行捕获，权威清单取自 ctx.workspaceChanges.summary()。",
+  "version": "0.2.6",
+  "description": "DeepSeek Harness 插件（仅宿主半边）：把每个轮开始/结束时的两侧文件内容出口成一条鉴权路由，供 Deepseek-Harness-for-VS-Code 扩展在 VS Code 里渲 染并排 diff。数据取自 @deepseek-ai/dsh-workspace-changes 的会话记录；两侧全文由 插件用公开钩子（fs/write-intent + turn/end）自行捕获，权威清单取自 ctx.workspaceChanges.summary()。路径匹配同时接受原文、相对 cwd 与折叠 `.`/`..` 后的绝对写 法——工作区外文件的链接（`../x`、`D:\\a\\..\\b`）也能对上记录。",
   "keywords": [
     "deepseek",
     "harness",

@@ -137,6 +137,14 @@ async function call(routes, query) {
   ok(Array.isArray(mod.inject) && mod.inject.includes('workspaceChanges') && mod.inject.includes('connection'), 'inject 声明 workspaceChanges + connection');
   ok(typeof mod.apply === 'function', '导出 apply');
   ok(typeof mod.changeCandidates === 'function', 'changeCandidates 可导出给测试');
+  // 工作区外文件（规格 010 AC-8）：链接常见 `../x` 写法，记录里却是绝对路径；
+  // 不折叠 `..` 就永远匹配不到，点击只能回落 DSH 侧栏。
+  const upCands = mod.changeCandidates('/w/proj', '../other/a.ts');
+  ok(upCands.includes('../other/a.ts'), '保留原文候选（summary.display 多为同形）');
+  ok(upCands.includes('/w/other/a.ts'), '折叠 .. 后的绝对候选（匹配 summary.path 的规范写法）');
+  const winUpCands = mod.changeCandidates('C:/w/proj', '..\\other\\a.ts');
+  ok(winUpCands.includes('C:/w/other/a.ts'), 'Windows 反斜杠 + .. 同样折叠');
+  ok(mod.changeCandidates('/w/proj', '/w/proj/../other/a.ts').includes('/w/other/a.ts'), '绝对写法里的 .. 也折叠');
 
   // ── [2] 路由注册与参数校验 ─────────────────────────────────────
   console.log('[2] 路由注册与参数校验');
@@ -330,6 +338,94 @@ async function call(routes, query) {
   setSummary(built, 96, 1, ['src/mix.ts']);
   r = await call(built.routes, { sessionId: 's7', turn: '1', path: f7 });
   ok(r.body.before.text === 'm0\n' && r.body.after.text === 'm2\n', 'write+edit 混用仍合并为一条净变更（AC-1 语义）');
+
+  // ── [12] 工作区外文件（规格 010）────────────────────────────────
+  // 真机场景：VS Code 打开的是项目 A，DSH 改的是 A 之外的 `../outside/a.ts`。
+  // 点击时带的路径写法与记录里的 `path`/`display` 常常不同形（一边绝对、一边相对），
+  // 两边都得能对上，否则只能回落 DSH 侧栏。
+  console.log('[12] 工作区外文件：不同路径写法都能命中');
+  const s8 = { id: 's8' };
+  const outsideDir = path.join(tmp, 'outside');
+  fs.mkdirSync(outsideDir, { recursive: true });
+  const outsideFile = path.join(outsideDir, 'a.ts');
+  fs.writeFileSync(outsideFile, 'v0\n');
+  built.event(s8, 'turn/start', { turn: 1 }, 110);
+  await built.writeIntent(outsideFile, { agent: { session: s8 } });
+  fs.writeFileSync(outsideFile, 'v1\n');
+  built.event(s8, 'turn/end', { turn: 1 }, 111);
+  built.event(s8, 'workspace/changes', { turn: 1 }, 120);
+  setSummary(built, 120, 1, ['../outside/a.ts']);
+  r = await call(built.routes, { sessionId: 's8', turn: '1', path: '../outside/a.ts' });
+  ok(r.status === 200 && r.body.matched === true && r.body.before.text === 'v0\n' && r.body.after.text === 'v1\n', '工作区外相对写法（../x）命中并给出两侧全文');
+  r = await call(built.routes, { sessionId: 's8', turn: '1', path: outsideFile });
+  ok(r.status === 200 && r.body.matched === true && r.body.after.text === 'v1\n', '同一文件改用绝对写法也命中（记录里是 ../x）');
+  r = await call(built.routes, { sessionId: 's8', turn: '1', path: path.join(cwd, '..', 'outside', 'a.ts') });
+  ok(r.status === 200 && r.body.matched === true, '带 .. 的绝对写法（cwd/../outside）也命中');
+
+  // ── [13] turn=latest：按会话最后一次改动出 diff（规格 011）─────
+  // 历史消息没有 `data-chat-turn`，客户端只能给 sessionId；由插件在该会话的
+  // 已记录清单里找「这个文件最后一次被改动」的轮——不猜、不读盘。
+  console.log('[13] turn=latest：老会话仍能定位到最后一次改动');
+  built.event(s8, 'turn/start', { turn: 3 }, 112);
+  await built.writeIntent(outsideFile, { agent: { session: s8 } });
+  fs.writeFileSync(outsideFile, 'v2\n');
+  built.event(s8, 'turn/end', { turn: 3 }, 113);
+  built.event(s8, 'workspace/changes', { turn: 3 }, 121);
+  setSummary(built, 121, 3, ['../outside/a.ts']);
+  r = await call(built.routes, { sessionId: 's8', turn: 'latest', path: '../outside/a.ts' });
+  ok(r.status === 200 && r.body.matched === true && r.body.latest === true, 'latest 命中并标记 latest');
+  ok(r.body.turn === 3, 'latest 取最新的那一轮（turn=3）');
+  ok(r.body.before.text === 'v1\n' && r.body.after.text === 'v2\n', 'latest 给的是该轮两侧全文');
+  r = await call(built.routes, { sessionId: 's8', turn: 'latest', path: 'src/never.ts' });
+  ok(r.status === 200 && r.body.matched === false && r.body.latest === true, '会话里没改过的文件 → matched:false（不猜）');
+  r = await call(built.routes, { sessionId: 'no-such-session', turn: 'latest', path: 'a.ts' });
+  ok(r.status === 404 && r.body.error === 'released', '未知会话 → 404 released');
+  r = await call(built.routes, { sessionId: 's8', turn: '', path: 'a.ts' });
+  ok(r.status === 400, 'turn 缺失且非 latest → 400');
+  r = await call(built.routes, { sessionId: 's8', turn: 'latest' });
+  ok(r.status === 400, 'latest 仍要求 path（不放开读盘面）');
+
+  // ── [14] 清单里没有、但自捕获有 → 仍出 diff（工作区外文件真机主因）────
+  // 真机 2026-10-30：session 在项目 A、改的是项目 B 的文件，点击永远 failed。
+  // DSH 的 workspace/changes 只统计「工作区变更」，工作区外目标常常不在清单里，
+  // 但我们用 fs/write-intent 自己捕获了两侧全文——按记录键匹配即可。
+  console.log('[14] 清单外的文件：按自捕获记录兜底');
+  const s9 = { id: 's9' };
+  const farFile = path.join(tmp, 'far', 'b.ts');
+  fs.mkdirSync(path.dirname(farFile), { recursive: true });
+  fs.writeFileSync(farFile, 'f0\n');
+  built.event(s9, 'turn/start', { turn: 2 }, 130);
+  await built.writeIntent(farFile, { agent: { session: s9 } });
+  fs.writeFileSync(farFile, 'f1\n');
+  built.event(s9, 'turn/end', { turn: 2 }, 131);
+  built.event(s9, 'workspace/changes', { turn: 2 }, 140);
+  setSummary(built, 140, 2, ['src/inside.ts']); // 模拟 DSH 只统计工作区
+  r = await call(built.routes, { sessionId: 's9', turn: '2', path: '../far/b.ts' });
+  ok(r.status === 200 && r.body.matched === true && r.body.before.text === 'f0\n' && r.body.after.text === 'f1\n', '清单里没有但自捕获有 → 仍给出两侧全文');
+  ok(r.body.display === farFile.replace(/\\/g, '/'), 'display 至少能定位到该文件（绝对键）');
+  r = await call(built.routes, { sessionId: 's9', turn: 'latest', path: farFile });
+  ok(r.status === 200 && r.body.matched === true && r.body.turn === 2, 'latest 也能在自捕获记录里找到');
+  r = await call(built.routes, { sessionId: 's9', turn: '2', path: '../far/none.ts' });
+  ok(r.status === 200 && r.body.matched === false, '两边都没有 → matched:false（不猜）');
+
+  // ctx.fs.processPath 对工作区外目标报错时，退回工具给的绝对路径，仍能捕获
+  const s10 = { id: 's10' };
+  const far2 = path.join(tmp, 'far', 'c.ts');
+  fs.writeFileSync(far2, 'g0\n');
+  const origProcessPath = built.ctx.fs.processPath;
+  built.ctx.fs.processPath = (t) => {
+    if (String(t).includes('far')) throw new Error('outside workspace');
+    return String(t);
+  };
+  built.event(s10, 'turn/start', { turn: 1 }, 150);
+  await built.writeIntent(far2, { agent: { session: s10 } });
+  built.ctx.fs.processPath = origProcessPath;
+  fs.writeFileSync(far2, 'g1\n');
+  built.event(s10, 'turn/end', { turn: 1 }, 151);
+  built.event(s10, 'workspace/changes', { turn: 1 }, 160);
+  setSummary(built, 160, 1, []);
+  r = await call(built.routes, { sessionId: 's10', turn: '1', path: far2 });
+  ok(r.status === 200 && r.body.matched === true && r.body.after.text === 'g1\n', 'processPath 报错时退回绝对路径仍能捕获');
 
   console.log('\n全部通过：' + passed + ' 项断言 ✓');
 })().catch((e) => {

@@ -83,6 +83,14 @@ export function changeCandidates(cwd, target) {
   const isAbs = normalizedRaw.startsWith('/') || /^[A-Za-z]:\//.test(normalizedRaw)
   const abs = isAbs ? normalizedRaw : norm(base + '/' + normalizedRaw)
   push(abs)
+  // 再给一份折叠 `.`/`..` 的绝对路径：工作区外文件的链接常写成 `../other/a.ts`
+  // （或 `D:\a\..\b`），而 summary 里同一文件可能记的是规范绝对路径；不折叠
+  // 两边永远不相等，点击只能回落 DSH 侧栏（规格 010）。
+  const absNorm = nodePath.posix.normalize(abs)
+  push(absNorm)
+  // 反方向也来一份：链接给绝对路径、记录（display）给 `../x` 时同样要对得上。
+  const relFromBase = nodePath.posix.relative(base, absNorm)
+  if (relFromBase !== '' && relFromBase !== '.') push(relFromBase)
   if (abs.startsWith(base + '/')) push(abs.slice(base.length + 1))
   return out.slice(0, 8)
 }
@@ -215,8 +223,70 @@ function validTurn(value) {
 }
 
 /**
- * 处理一次取数：{sessionId, turn, path} → 两侧内容。
- * 只按「已记录的清单」匹配，绝不按请求里的路径直接读盘。
+ * 展示用的路径：能相对 cwd 就相对（与 DSH 的 display 同形），否则用绝对键。
+ * @param {string} cwd
+ * @param {string} key 记录里的规范绝对路径
+ * @returns {string}
+ */
+function displayOf(cwd, key) {
+  const base = typeof cwd === 'string' ? norm(cwd) : ''
+  if (base !== '' && key.startsWith(base + '/')) return key.slice(base.length + 1)
+  return key
+}
+
+/**
+ * 在本轮的自捕获记录里找这个文件。
+ *
+ * 为什么需要（真机，2026-10-30）：DSH 的 `workspace/changes` 清单不一定收录工作区外
+ * 目标（它统计的是「工作区变更」），但那类文件正是我们用 `fs/write-intent` 自己捕获了
+ * 两侧全文的。清单里没有就直接回 matched:false 会让「工作区外文件」永远只能开 DSH 侧栏。
+ * 这里按记录键（我们捕获时的绝对路径）匹配，仍然**不按请求路径读盘**。
+ * @returns {{entry: any, display: string} | null}
+ */
+function findCaptured(state, turn, cwd, target) {
+  const record = state.records.get(turn)
+  if (!record || !record.files) return null
+  const wanted = new Set(changeCandidates(cwd, target).map(norm))
+  for (const entry of record.files.values()) {
+    if (!entry || typeof entry.key !== 'string') continue
+    if (wanted.has(entry.key)) return { entry, display: displayOf(cwd, entry.key) }
+  }
+  return null
+}
+
+/**
+ * 在「已记录」的轮里找这个文件最后一次被改动的那一轮（从大到小扫）。
+ * 两个来源都看：`summary()` 的权威清单，以及我们自己捕获的记录（工作区外文件常常
+ * 只在后者里）。历史消息没有 `data-chat-turn` 时客户端只能给 sessionId，由这里回答
+ * 「本会话最后一次改动」（规格 011）。找不到返回 0。
+ */
+function latestTurnOf(service, state, sessionId, target) {
+  const turns = Array.from(state.seqByTurn.keys()).sort((a, b) => b - a)
+  for (const turn of turns) {
+    const summary = service.summary(sessionId, state.seqByTurn.get(turn))
+    const cwd = summary && typeof summary.cwd === 'string' ? summary.cwd : ''
+    if (summary && Array.isArray(summary.files) && fileIndexOf(summary, target) >= 0) return turn
+    if (findCaptured(state, turn, cwd, target)) return turn
+  }
+  return 0
+}
+
+/** 把捕获到的两侧内容按路由协议出口（二进制/超大分别标记）。 */
+function capturedResponse(meta, display, entry) {
+  // 清单里有、但我们没有两侧全文（典型：shell 直接改动，没有 intent 钩子）。
+  if (!entry) return json(200, { ...meta, matched: true, display, unavailable: 'no-text' })
+  if ((entry.before && entry.before.kind === 'binary') || (entry.after && entry.after.kind === 'binary')) {
+    return json(200, { ...meta, matched: true, display, binary: true })
+  }
+  if ((entry.before && entry.before.kind === 'oversized') || (entry.after && entry.after.kind === 'oversized')) {
+    return json(200, { ...meta, matched: true, display, oversized: true })
+  }
+  return json(200, { ...meta, matched: true, display, before: sideJson(entry.before), after: sideJson(entry.after) })
+}
+
+/**
+ * 处理一次取数：{sessionId, turn | 'latest', path} → 两侧内容。
+ * 匹配顺序：`summary()` 清单 → 本轮自捕获记录；绝不按请求里的路径直接读盘。
  */
 async function handle(ctx, sessions, request) {
   let url
@@ -228,42 +298,51 @@ async function handle(ctx, sessions, request) {
   const query = url.searchParams
   const sessionId = query.get('sessionId') || ''
   const pathParam = query.get('path') || ''
-  const turn = validTurn(query.get('turn') || '')
+  const turnRaw = query.get('turn') || ''
+  const latest = turnRaw === 'latest'
+  const turn = latest ? 0 : validTurn(turnRaw)
   if (sessionId === '' || sessionId.length > MAX_SESSION_ID) return json(400, { error: 'bad-request' })
   if (pathParam === '' || pathParam.length > MAX_PATH) return json(400, { error: 'bad-request' })
-  if (turn === 0 || !/^\d+$/.test(query.get('turn') || '')) return json(400, { error: 'bad-request' })
+  if (!latest && (turn === 0 || !/^\d+$/.test(turnRaw))) return json(400, { error: 'bad-request' })
 
   const state = sessions.get(sessionId)
-  const seq = state ? state.seqByTurn.get(turn) : undefined
   // 会话不在内存（已释放 / dsh 重启过）与「会话在但这个轮没有记录」分开报，
   // 扩展据此给不同文案（spec 第 8 节）。
-  if (seq === undefined) return json(404, { error: state ? 'no-record' : 'released' })
+  if (!state) return json(404, { error: 'released' })
 
   const service = ctx && ctx.workspaceChanges
   if (!service || typeof service.summary !== 'function') return json(404, { error: 'unavailable' })
+
+  // 收尾未跑完时先等同一份结果：否则会短暂误报 no-text / matched:false。
+  if (state.pending) await state.pending.catch(() => {})
+
+  const targetTurn = latest ? latestTurnOf(service, state, sessionId, pathParam) : turn
+  if (latest && targetTurn === 0) return json(200, { matched: false, latest: true })
+
+  const seq = state.seqByTurn.get(targetTurn)
+  if (seq === undefined) return json(404, { error: 'no-record' })
+  if (state.open && state.open.turn === targetTurn) await startFinalize(state)
+
+  // 回包里的轮次永远是「实际用的那一轮」（latest 时可能与客户端预期不同），
+  // 宿主拿它写标题，并在 latest 时提示「这不是你点的那一轮」。
+  const meta = latest ? { turn: targetTurn, latest: true } : { turn: targetTurn }
   const summary = service.summary(sessionId, seq)
-  if (!summary || typeof summary !== 'object' || !Array.isArray(summary.files)) return json(404, { error: 'unavailable' })
-
-  const index0 = fileIndexOf(summary, pathParam)
-  if (index0 < 0) return json(200, { matched: false, turn })
-  const file = summary.files[index0]
-  const display = typeof file.display === 'string' ? file.display : String(file.path || '')
-  const rel = typeof file.path === 'string' ? file.path : ''
-
-  // 点击可能落在「记录已 append、turn/end 收尾还没跑完」的窗口里：等同一份收尾结果。
-  const pending = state.pending
-  if (pending) await pending.catch(() => {})
-  if (state.open && state.open.turn === turn) await startFinalize(state)
-  const entry = pickCapture(state.records.get(turn), typeof summary.cwd === 'string' ? summary.cwd : '', rel)
-  // 清单里有、但我们没有两侧全文（典型：shell 直接改动，没有 write-intent 钩子）。
-  if (!entry) return json(200, { matched: true, turn, display, unavailable: 'no-text' })
-  if ((entry.before && entry.before.kind === 'binary') || (entry.after && entry.after.kind === 'binary')) {
-    return json(200, { matched: true, turn, display, binary: true })
+  const cwd = summary && typeof summary.cwd === 'string' ? summary.cwd : ''
+  const listed = summary && Array.isArray(summary.files) ? summary.files : null
+  if (listed) {
+    const index0 = fileIndexOf(summary, pathParam)
+    if (index0 >= 0) {
+      const file = listed[index0]
+      const display = typeof file.display === 'string' ? file.display : String(file.path || '')
+      const rel = typeof file.path === 'string' ? file.path : ''
+      return capturedResponse(meta, display, pickCapture(state.records.get(targetTurn), cwd, rel))
+    }
   }
-  if ((entry.before && entry.before.kind === 'oversized') || (entry.after && entry.after.kind === 'oversized')) {
-    return json(200, { matched: true, turn, display, oversized: true })
-  }
-  return json(200, { matched: true, turn, display, before: sideJson(entry.before), after: sideJson(entry.after) })
+  // 清单里没有（工作区外目标、shell 改动等）→ 用我们自己的捕获记录兜底。
+  const captured = findCaptured(state, targetTurn, cwd, pathParam)
+  if (captured) return capturedResponse(meta, captured.display, captured.entry)
+  if (!listed) return json(404, { error: 'unavailable' })
+  return json(200, { ...meta, matched: false })
 }
 
 /**
@@ -330,6 +409,9 @@ export function apply(ctx) {
         } catch {
           abs = ''
         }
+        // processPath 对工作区外目标可能报错/给空：退回工具给的路径（已是绝对路径时）。
+        // 不这样的话，工作区外文件永远没有捕获，轮级 diff 只能回 no-text。
+        if (norm(abs) === '' && typeof target === 'string' && nodePath.isAbsolute(target)) abs = target
         const key = norm(abs)
         if (key !== '' && !state.open.captures.has(key)) {
           const before = await readSide(abs)
