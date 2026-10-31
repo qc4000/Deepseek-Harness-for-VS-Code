@@ -219,6 +219,10 @@ webview → 宿主：{ type:'dsh-reveal-path', token, path, change? }
 ```
 
 - `change = {sessionId, turn}` 只在 `mode=diffAndOpen`（`ack.diff=true`）时携带；webview 侧逐字段校验，不合规整条丢弃。
+  历史消息没有 `data-chat-turn` 时客户端改发 `{sessionId, latest:true}`：宿主向轮级路由请求 `turn=latest`，
+  由 `dsh-vscode-changes` 在该会话的已记录清单里找「这个文件最后一次改动」（spec 011），回包带实际 `turn`。
+- 客户端还随 `path` 上报 DSH 会话 `cwd`（`sessions.list` 的 `cwd`）：相对路径以它为基准解析，
+  不再拿 VS Code 文件夹瞎猜（DSH 工作区与文件夹不一致时那样会命中同名的另一个文件）。
 - `reveal-ack` 是「宿主已接单」：页面据此把等待从 2.5s 放宽到 6s，避开「diff 与 DSH 侧栏同时打开」。
 
 **工作区钉住消息协议**（独立类型，不复用 `ack`）：
@@ -238,6 +242,14 @@ webview → 宿主：{ type:'dsh-workspace-pin-unavailable' }   // 8s 内没收�
 - 宿主侧 `resolveWorkspaceTarget()`：规范化 → 去行号（`:12` / `#L12`）→ 相对路径对每个工作区文件夹
   生成候选 → 必须 `isInsideFolder` 且 `stat` 成功；绝对路径同样要求在工作区内。
 - 成功才回执 `ok:true`；失败回执 `ok:false`，插件 2.5s 内未收到回执也会回放原始点击。
+- 唯一例外（spec 010，仅 `diffAndOpen`）：目标在工作区外或已删除时，宿主调
+  `openOutOfWorkspaceDiff()` 只用 DSH 自己记录的轮级两侧全文开 diff——不 `stat`、不读盘、
+  不跑 git（不走 P0）、不在资源管理器定位，因此 001 的读盘边界不变；取不到就回执 `ok:false`
+  并由 `notifyOutOfWorkspaceLink()` 给出原因与出路。
+- 轮级数据也只活在 DSH 进程内存里（`session/disposed`/重启即失），所以工作区外文件没有数据源时
+  默认只能交回 DSH 侧栏；`dshPanel.outOfWorkspaceFileAccess=true` 时改走
+  `openOutOfWorkspaceFallback()`：git `HEAD` ↔ 当前内容 → 普通打开（`revealOnly` 只定位）。
+  这是**显式放开读盘面**的开关，默认关闭（spec 012）。
 
 **快捷键转发消息协议**（spec 008；独立类型，不复用 `ack`）：
 

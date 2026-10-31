@@ -82,7 +82,8 @@
 | `dshPanel.installClipboardPlugin` | `true` | 自动安装内置 `dsh-webview-clipboard` 插件（面板内复制按钮走宿主剪贴板；macOS 额外修复 ⌘C/⌘V/⌘X）。怀疑影响 dsh web 启动时可关闭对比；关闭后复制按钮恢复 DSH 原生行为 |
 | `dshPanel.installOpenExternalPlugin` | `true` | 自动安装内置 `dsh-vscode-open-external` 插件：面板内 `window.open`（典型：DeepSeek 账号登录授权页）改在本机系统浏览器打开，Remote-WSL / Remote-SSH 下由你的 Windows 浏览器打开 |
 | `dshPanel.remoteAuthProxy` | `true` | Remote-SSH / Dev Containers 等真远程窗口下是否启用受管认证代理（默认启用）；代理只监听服务器回环，多用户共享服务器建议关闭，关闭后面板会给出浏览器认证引导 |
-| `dshPanel.workspaceFileLinkAction` | `revealAndOpen` | 对话里工作区文件/文件夹链接的点击行为：`revealAndOpen` 资源管理器定位并打开 / `diffAndOpen` 定位 + 展示变更（并排 diff，见下节）/ `revealOnly` 仅定位 / `off` 不接管（保持 DSH 侧边栏打开，也不安装配套插件） |
+| `dshPanel.workspaceFileLinkAction` | `revealAndOpen` | 对话里工作区文件/文件夹链接的点击行为：`revealAndOpen` 资源管理器定位并打开 / `diffAndOpen` 定位 + 展示变更（并排 diff，工作区外的文件也能看该轮变更，见下节）/ `revealOnly` 仅定位 / `off` 不接管（保持 DSH 侧边栏打开，也不安装配套插件） |
+| `dshPanel.outOfWorkspaceFileAccess` | `false` | 是否把**工作区外**文件也交给 VS Code。默认 `false`（工作区外链接取不到轮级记录时保持 DSH 侧栏打开）。DSH 的轮级变更记录只在进程内存，**重启 dsh web 后旧轮次就没有数据**；开启后按「轮级 → 与 git `HEAD` 的差异 → 直接打开」降级，等价于把模型给的任意路径交给编辑器，请自行权衡 |
 | `dshPanel.dshSidebar` | `auto` | DSH 左侧栏显示策略：`auto` 窄面板（<1024px）自动隐藏、宽面板显示 / `show` 始终显示（等同关闭本能力）/ `hide` 始终隐藏；顶部工具条可随时手动切换，修改本配置会清除手动切换 |
 | `dshPanel.forwardVSCodeKeys` | `true` | 面板内焦点时转发 VS Code 快捷键（自动安装配套插件 `dsh-vscode-keys`）。转发前先查 DSH 自己的键位表，命中即让位，不会抢 DSH 的快捷键；关闭后不安装插件、不监听按键，行为与本能力不存在时完全一致 |
 | `dshPanel.forwardKeybindings` | `{}` | 在默认转发表之上增删按键：值写命令 id 表示转发（也可覆盖默认），写 `false` 表示永不拦截。不支持两段式（`ctrl+k ctrl+s`）；无修饰键的单键不会被拦截（会破坏输入框） |
@@ -186,14 +187,42 @@
 - 不同轮各自独立：点第 3 轮的链接得到第 3 轮的增量，不会累积到最新；
 - 历史轮在会话存活期间都能看；**重启 dsh web 或会话释放后**记录消失，自动退回「与 HEAD 的差异」；
 - 二进制文件、单侧超过 1 MiB、本轮没改过的文件：退回普通打开并给出状态栏提示。
+- **文件不在当前 VS Code 工作区里也能看**（1.0.7 起）：DSH 改到工作区外（或本轮删除）的文件，
+  点击同样给出该轮的并排 diff——两侧内容全部来自 DSH 自己的记录，不从磁盘读那个文件，
+  也不在资源管理器定位；取不到记录时仍交给 DSH 侧栏，并在状态栏说明原因。
+  （`revealAndOpen` / `revealOnly` 仍只接管工作区内目标，提示里会告知可切到 `diffAndOpen`。）
+- **相对路径按 DSH 的工作区解析**（1.0.7 起）：`src/a.ts` 这种相对链接以 DSH **当前会话的 cwd**
+  为基准，不再拿 VS Code 文件夹去拼——DSH 工作区与 VS Code 文件夹不一致时，那样会定位到
+  同名的**另一个**文件。拿不到 cwd（老版 dsh）时才退回旧的多根尝试。
+- **老会话照样能看**（1.0.7 起）：历史消息里往往没有轮标记，点击时会改问 DSH
+  「这个文件在本会话里最后一次改动是哪一轮」并展示那一轮，标题写实际轮次，状态栏明说
+  「已展示本会话最近一次改动」——不会再把别的轮冒充成你点的那一轮。
 
 实现与边界（沿用「忠实窗口」）：
 
 - 轮级数据由内置插件 `dsh-vscode-changes`（仅宿主半边）从 DSH 进程内的会话记录里取出，
   经一条鉴权路由交给扩展；路由只按「会话 + 轮 + 已记录的文件清单」匹配，**不接受任意路径读盘**；
-- 客户端插件只多带「会话 + 轮」两个坐标，不搬运文件内容；拿不到坐标就不带，宿主自动走 HEAD 对比；
+- 客户端插件只多带「会话 + 轮 + DSH 会话 cwd」几个坐标，不搬运文件内容；轮标记缺失时改带 `latest`，
+  连会话都拿不到才不带坐标（宿主自动走 HEAD 对比）；
 - 取数慢于 2.5 s 时宿主先回「已接单」，把等待放宽到 6 s，避免超时回放导致「diff 与 DSH 侧栏同时打开」；
 - 首次切换到这个模式会安装配套插件，需点「重启 dsh web」使其生效（扩展会提示）。
+
+点击行为不对时可在面板 DevTools（帮助 → 切换开发人员工具）里执行一行：
+
+```js
+__dshVscodeFileLinks.log()   // 最近 20 次点击：{path, cwd, change, result, reason?}
+```
+
+`cwd` 为空说明拿不到 DSH 会话工作区；`result: 'failed'` 时看 `reason`：`no-coord`（没拿到会话）、
+`no-record`（该轮在插件里没记录，多为重启 dsh web 之前）、`no-text`（清单里有但没捕获到全文，
+多为 shell 直接改动）、`unavailable`（插件未生效）；`result: 'timeout'` 说明宿主没回执。
+
+#### 工作区外文件没有轮级数据时
+
+`dsh web` 重启后（或会话被卸载后）旧轮次的变更记录就没了——DSH 自己的 `workspaceChanges`
+也一样只在内存里。工作区内文件这时还能退回「与 HEAD 的差异」或直接打开；**工作区外**文件默认
+只能退回 DSH 侧栏（会提示原因）。需要直接看的话把 `dshPanel.outOfWorkspaceFileAccess` 设为 `true`：
+优先轮级记录，拿不到就与 git `HEAD` 对比，再不行直接在工作区外文件上打开。
 
 ### 隐藏 DSH 左侧栏（v1.0.1 起）
 
