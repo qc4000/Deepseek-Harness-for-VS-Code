@@ -2,6 +2,45 @@
 
 本项目遵循 [语义化版本](https://semver.org/lang/zh-CN/)。完整提交历史见 [GitHub](https://github.com/Vithrive/Deepseek-Harness-for-VS-Code/commits/main)。
 
+## 1.0.7
+
+**文件链接（修复）**
+
+- **DSH 改到工作区外的文件也能在 VS Code 里看变更**：此前 `workspaceFileLinkAction=diffAndOpen` 时，目标不在当前 VS Code 打开的工作区里（或文件已在本轮被删除）会直接回落到 DSH 侧栏——宿主先做「工作区内且 `stat` 成功」的解析，失败后就没再问轮级数据。现在解析失败时会用链接里的**原始路径**去 `dsh-vscode-changes` 的轮级路由取两侧全文，命中即在 VS Code 打开「第 N 轮」并排 diff，DSH 侧栏不再打开。
+- **不扩大读盘边界**：这条新链路不 `stat`、不读本地文件、不跑 git（不走「与 HEAD 的差异」）、不在资源管理器定位，两侧内容全部来自 DSH 自己的会话记录，因此 001 的「工作区内才定位/打开」边界保持不变；`revealAndOpen` / `revealOnly` 仍只接管工作区内目标。
+- **失败照旧可见**：取不到记录（该轮没改、会话已释放、插件未重启、二进制/超 1 MiB、超时）时仍交给 DSH 侧栏，并在状态栏说明原因与下一步（如「重启 dsh web」）；非 diff 模式点工作区外链接时提示可切到 `diffAndOpen`。
+- 顺带修好两个次生现象：本轮**删除**的文件（文件已不存在）现在也能看删除 diff；DSH 当前工作区与 VS Code 文件夹不一致时，整场对话的链接不再全退化到 DSH 侧栏。
+- `dsh-vscode-changes` 0.2.3 → 0.2.6（路径候选归一 + `turn=latest` + 清单外文件按自捕获记录兜底）、`dsh-vscode-file-links` 0.2.5 → 0.2.7（上报会话 cwd、无轮标记时带 `latest`、诊断日志含失败原因码）。装包后请点面板顶部「重启 dsh web」使其生效。
+
+**路径匹配（修复）**
+
+- **相对链接按 DSH 的工作区解析**：`src/a.ts` 这类相对链接以前是对 VS Code 文件夹逐个拼——DSH 工作区与 VS Code 文件夹不一致时会定位/打开**同名的另一个文件**。现在客户端随点击上报 DSH 会话的 `cwd`（读 `sessions.list`），宿主只按它拼；拿不到 cwd（老版 dsh / 会话未就绪）才退回旧的多根尝试。
+- **老会话、旧轮次不再一律退到 DSH 侧栏**：历史消息常常没有轮标记（`data-chat-turn`），以前直接不带坐标 → `ok:false`。现在改发 `change = {sessionId, latest:true}`，由 `dsh-vscode-changes` 在该会话的**已记录清单**里找「这个文件最后一次被改动」的轮并回两侧全文；标题写实际轮次，状态栏明说「已展示本会话最近一次改动（第 N 轮）」。该轮没改过时也会自动再试一次。
+- 工作区外取数的尝试链改为「写法（原文 / 去行号 / 按 cwd 绝对化）× 坐标（点击所属轮 / latest）」，`no-change` / `no-record` / `no-text` 都会继续换下一种，其余失败不白跑。
+- **工作区外文件不再一律匹配不到**：DSH 的 `workspace/changes` 清单只统计「工作区变更」，工作区外目标常常不在里面，以前直接判 `matched:false` → DSH 侧栏。现在匹配不到清单时会按本插件**自捕获的记录**（`fs/write-intent` 存的两侧全文）再匹配一次；`ctx.fs.processPath` 对工作区外目标报错时也退回工具给的绝对路径，仍能捕获。
+- **失败原因可见**：`reveal-result` 带上短原因码（`no-coord` / `no-record` / `no-text` / `unavailable` …），页面日志 `__dshVscodeFileLinks.log()` 每一条都能看到 `result` 与 `reason`，不用再猜断在哪。
+- **Windows 反斜杠绝对路径**：链接/变更记录里的 `D:\a\b`、`\\server\share` 此前被当成相对路径拼到工作区根下，导致 Windows 上文件链接与轮级 diff 匹配不到；现在先归一化再判定绝对路径（`extension.js` 与 `dsh-vscode-changes` 同步修正）。
+
+**新增配置**
+
+- `dshPanel.outOfWorkspaceFileAccess`（默认 `false`）：是否把**工作区外**文件也交给 VS Code。
+  背景：轮级变更记录只在 DSH 进程内存里，`dsh web` 重启后旧轮次就没了（DSH 自己的 `workspaceChanges` 同样如此），
+  而工作区外文件没有 P0/L0 兜底 → 只能退回 DSH 侧栏（日志里原因码是 `released`）。
+  开启后按「轮级 → 与 git `HEAD` 的差异 → 直接打开」降级（`revealOnly` 只定位）；
+  关闭时（默认）不会对工作区外路径 `stat`/跑 git，状态栏会说明原因并给出这个开关。
+
+**排障**
+
+- 面板 DevTools 里可查 `__dshVscodeFileLinks.log()`：最近 20 次点击的 `{path, cwd, change, result}`（环形缓冲、不写磁盘、不含文件内容）；`.clear()` 可清空。`cwd` 为空、`result: 'failed'` / `'timeout'` 分别指向不同的断点。
+
+**测试**
+
+- `test/file-link-diff.test.js` 74 → 138 项：新增工作区外链路、`latest` 坐标直达与自动重试、`absoluteFromCwd`、cwd 绝对候选、不可用不重试、失败回执带 reason；opt-in 兜底的默认关闭/开启两条路径。
+- `test/dsh-changes-plugin.test.js` 45 → 64 项：新增 `turn=latest`（命中最新改动 / 未改动 `matched:false` / 未知会话 404 / 参数校验）、不同路径写法互命中、清单外文件按自捕获记录兜底、`processPath` 报错时退回绝对路径。
+- `test/file-link-client-sim.test.js` 46 → 56 项：无轮标记改发 `latest`、cwd 上报与缺失、诊断日志与失败原因码。
+- `test/workspace-file-link.test.js` 85 → 93 项：cwd 基准解析、cwd 为空/非法退回旧解析、中继透传 `cwd` / `latest` / 失败 `reason`。
+- 规格：[010-out-of-workspace-file-link](docs/sdd/specs/010-out-of-workspace-file-link/spec.md) · [011-dsh-cwd-and-latest-turn](docs/sdd/specs/011-dsh-cwd-and-latest-turn/spec.md) · [012-out-of-workspace-opt-in](docs/sdd/specs/012-out-of-workspace-opt-in/spec.md)。
+
 ## 1.0.6
 
 **面板内快捷键（新增）**
