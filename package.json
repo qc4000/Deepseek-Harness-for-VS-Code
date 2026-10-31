@@ -125,11 +125,16 @@
           ],
           "enumDescriptions": [
             "点击 DSH 对话里的工作区文件/文件夹链接时，在 VS Code 资源管理器中 定位并打开（文件打开编辑器，文件夹仅定位）",
-            "定位 + 展示变更：优先打开「该轮的变更」并排对比（左右为该轮开始/结束时的原文，标题如 a.ts · 第 7 轮），拿不到时退回「与 HEAD 的差异」，再不行打开原文件；会安装配套 插件 dsh-vscode-changes",
+            "定位 + 展示变更：优先打开「该轮的变更」并排对比（左右为该轮开始/结束时的原文，标题如 a.ts · 第 7 轮），拿不到时退回「与 HEAD 的差异」，再不行打开原文件；会安装配套 插件 dsh-vscode-changes。目标不在当前 VS Code 工作区（或本轮已删除）时，仅用 DSH 自己的轮级记录出 diff——不读磁盘、不在资源管理器定位",
             "只在本窗口的 VS Code 资源管理器中定位并选中，不额外打开编辑器",
             "不接管：保持 DSH 自身行为（在 DSH 侧边栏打开）。此时也不会安装配套插件 dsh-vscode-file-links"
           ],
           "description": "DSH 对话里的工作区文件/文件夹链接点击行为（自动安装配套插件 dsh-vscode-file-links 实现）。只有目标位于当前 VS Code 工作区内且真实存在时才接管，否则保持 DSH 侧边栏打开；按住 Ctrl/Cmd/Shift/Alt 点击可临时走 DSH 侧边栏"
+        },
+        "dshPanel.outOfWorkspaceFileAccess": {
+          "type": "boolean",
+          "default": false,
+          "markdownDescription": "是否允许把**工作区外**的文件交给 VS Code（默认 `false`：保持 DSH 侧栏打开）。\n\n默认关闭的原因：链接里的路径来自模型，把它直接交给 VS Code（`stat` / 打开 / 与 git 对比）等于把「工作区外任意路径」变成可达。而 DSH 的轮级变更记录只存在进程内存，**重启 dsh web 后旧轮次就没有数据了**——工作区外文件因此没有任何可看的来源，只能退回 DSH 侧栏。\n\n开启后：`diffAndOpen` 下先试轮级记录，拿不到就退回「该文件与 git `HEAD` 的差异」，再不行直接在工作区外文件上打开；`revealAndOpen` / `revealOnly` 直接打开/定位该文件。"
         },
         "dshPanel.dshSidebar": {
           "type": "string",

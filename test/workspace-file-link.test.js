@@ -139,6 +139,9 @@ ok(script.includes('var FRAME_ORIGIN = "http://127.0.0.1:3080"'), '目标 origin
 ok(script.includes('event.origin !== FRAME_ORIGIN') && script.includes('event.source === frameWindow()'), '只接受自己 iframe 且 origin 相符的插件消息');
 ok(script.includes("type: 'dsh-reveal-path'") && script.includes("data.type === 'dsh-reveal-result'") && script.includes("type: 'reveal-result'"), 'reveal 请求/回执双向转发');
 ok(script.includes('ackFrame') && script.includes("addEventListener('load'"), 'iframe 加载后重新握手（刷新/重启 dsh web 后仍生效）');
+ok(script.includes('reveal.cwd = data.cwd'), '中继透传 DSH 会话 cwd（规格 011）');
+ok(script.includes('change.latest === true'), '中继接受 latest 坐标（历史消息无轮标记时的兜底）');
+ok(script.includes('failed.reason = data.reason'), '中继把失败原因码转回页面（诊断日志可定位）');
 ok(script.includes("data.type === 'dsh-open-link'") && script.includes("data.type === 'insert-selection'"), '既有中继（外链、发送选中内容）未被破坏');
 ok(script.includes('/^https?:\\/\\//i'), '既有外链正则的反斜杠转义仍然正确');
 
@@ -186,6 +189,15 @@ vscodeStub.workspace.workspaceFolders = [{ uri: fileUri(REPO) }];
   vscodeStub.workspace.workspaceFolders = [{ uri: fileUri(path.join(REPO, 'media')) }, { uri: fileUri(REPO) }];
   ok((await I.resolveWorkspaceTarget('extension.js')) !== null, '多工作区：逐个根尝试直到命中');
   vscodeStub.workspace.workspaceFolders = [{ uri: fileUri(REPO) }];
+
+  // 相对路径按 DSH 会话 cwd 解析（规格 011）：DSH 工作区 ≠ VS Code 文件夹时，
+  // 拿 VS Code 根拼会定位到同名的另一个文件（真机踩坑）。
+  ok((await I.resolveWorkspaceTarget('extension.js', path.join(REPO, 'media'))) === null,
+    'DSH cwd 指向别处时，相对路径不按 VS Code 根解析（不命中同名文件）');
+  ok((await I.resolveWorkspaceTarget('extension.js', REPO)) !== null, 'DSH cwd = VS Code 根时照常命中');
+  ok((await I.resolveWorkspaceTarget('extension.js', '')) !== null, 'cwd 为空时退回旧的多根解析');
+  ok((await I.resolveWorkspaceTarget('extension.js', 'relative/cwd')) !== null, '非法 cwd（相对路径）被忽略，退回旧解析');
+  ok(I.absoluteFromCwd('src/a.ts', REPO) === path.join(REPO, 'src/a.ts').replace(/\\/g, '/'), 'absoluteFromCwd 按 cwd 折绝对路径');
 
   // ── [5] dsh-reveal-path 消息处理 ─────────────────────────────
   console.log('[5] reveal 消息处理与回执');

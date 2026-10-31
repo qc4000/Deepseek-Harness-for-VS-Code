@@ -2176,14 +2176,21 @@ ${sidebarToolbarHtml}
           token: data.token.slice(0, 64),
           path: data.path.slice(0, 4096)
         };
+        // DSH 会话 cwd：相对链接的基准（规格 011）。只透传形状合法的值，宿主还会再校验。
+        if (typeof data.cwd === 'string' && data.cwd.length > 0) reveal.cwd = data.cwd.slice(0, 4096);
         // 轮坐标只用于在 DSH 的「已记录清单」里查，不参与路径拼接；
         // 只有 diff 模式才送（其它模式宿主要么不认，要么不取），字段不合规就整条丢掉。
         var change = fileLinkMode === 'diffAndOpen' ? data.change : null;
         if (change && typeof change === 'object'
-            && typeof change.sessionId === 'string' && change.sessionId.length > 0 && change.sessionId.length <= 128
-            && typeof change.turn === 'number' && isFinite(change.turn)
-            && Math.floor(change.turn) === change.turn && change.turn >= 1 && change.turn <= 1000000) {
-          reveal.change = { sessionId: change.sessionId, turn: change.turn };
+            && typeof change.sessionId === 'string' && change.sessionId.length > 0 && change.sessionId.length <= 128) {
+          var okTurn = typeof change.turn === 'number' && isFinite(change.turn)
+            && Math.floor(change.turn) === change.turn && change.turn >= 1 && change.turn <= 1000000;
+          if (okTurn) {
+            reveal.change = { sessionId: change.sessionId, turn: change.turn };
+          } else if (change.latest === true) {
+            // 历史消息没有轮标记：让宿主去问「这个文件最后一次改动是哪一轮」（规格 011）。
+            reveal.change = { sessionId: change.sessionId, latest: true };
+          }
         }
         vscode.postMessage(reveal);
       }
@@ -2266,7 +2273,12 @@ ${sidebarToolbarHtml}
     }
     if (data.type === 'dsh-reveal-result' && typeof data.token === 'string') {
       // 扩展宿主的处理结果：转发回 DSH 页面，由插件决定是否回放原始点击。
-      postToFrame({ source: HOST_ID, type: 'reveal-result', token: data.token, ok: data.ok === true });
+      // reason 是失败短原因码（供页面诊断日志），不包含路径以外的新信息。
+      var failed = { source: HOST_ID, type: 'reveal-result', token: data.token, ok: data.ok === true };
+      if (data.ok !== true && typeof data.reason === 'string' && data.reason !== '') {
+        failed.reason = data.reason.slice(0, 32);
+      }
+      postToFrame(failed);
       return;
     }
     if (data.type === 'dsh-clipboard-result' && typeof data.token === 'string') {
@@ -3135,6 +3147,19 @@ function fileLinkAction() {
 }
 
 /**
+ * 是否允许把**工作区外**文件交给 VS Code（默认关闭）。
+ *
+ * 默认关闭是因为它会扩大读盘面：links 里的路径来自模型，把这个路径直接交给编辑器
+ * （stat/打开/git 对比）等同于把「工作区外任意路径」变成可达（宪法第五条）。
+ * 但 DSH 的轮级变更记录只在内存里、重启即失，工作区外文件因此没有任何数据源，
+ * 只能退回 DSH 侧栏——需要时由用户显式权衡后开启。
+ * @returns {boolean}
+ */
+function allowOutOfWorkspaceAccess() {
+  return cfg().get('dshPanel.outOfWorkspaceFileAccess', false) === true;
+}
+
+/**
  * 侧栏显示策略（配置值，非法值收敛为 auto）。
  * - auto：窄于 SIDEBAR_NARROW_WIDTH 隐藏（与 DSH 自身的折叠断点一致）；
  * - show：始终显示（不拦截任何东西，也不安装测量插件）；
@@ -3948,6 +3973,16 @@ function isAbsoluteLinkPath(p) {
   return s.startsWith('/') || s.startsWith('\\') || /^[A-Za-z]:[\\/]/.test(s);
 }
 
+/**
+ * 去掉链接尾部行号（`:12` / `#L12` / `:12-20`）。
+ * 路径匹配先试原文、再试去掉行号的形式：模型写的行号不属于文件名。
+ * @param {unknown} p
+ * @returns {string}
+ */
+function stripLinkLineSuffix(p) {
+  return String(p == null ? '' : p).replace(/[:#]L?\d+(?:-\d+)?$/i, '');
+}
+
 /** 路径比较用规范形式：统一分隔符、去尾斜杠，Windows/macOS 下大小写不敏感。 */
 function normalizePathForCompare(p) {
   let s = path.normalize(String(p)).replace(/\\/g, '/');
@@ -3963,8 +3998,19 @@ function isInsideFolder(abs, folder) {
   return a === f || a.startsWith(f + '/');
 }
 
-/** 由链接路径生成候选 Uri：绝对路径按原样；相对路径对每个工作区文件夹各拼一个。 */
-function candidateLinkUris(p, folders) {
+/**
+ * 由链接路径生成候选 Uri：绝对路径按原样；相对路径优先按 DSH 会话 cwd 拼，
+ * 拿不到 cwd 时才对每个工作区文件夹各拼一个。
+ *
+ * 为什么不能只按工作区文件夹拼：DSH 渲染的链接是「相对它的当前会话 cwd」，DSH 工作区
+ * 与 VS Code 文件夹不一致时，同一个 `src/a.ts` 在两边指向不同文件——按 VS Code 根拼
+ * 会定位到同名的另一个文件（真机踩坑，规格 011）。
+ * @param {string} p 已净化的链接路径
+ * @param {any[]} folders VS Code 工作区文件夹
+ * @param {string} [dshCwd] DSH 当前会话 cwd（可选）
+ * @returns {any[]}
+ */
+function candidateLinkUris(p, folders, dshCwd) {
   const out = [];
   if (isAbsoluteLinkPath(p)) {
     try {
@@ -3975,9 +4021,18 @@ function candidateLinkUris(p, folders) {
     return out;
   }
   const segments = p.split('/').filter((s) => s !== '');
+  const base = typeof dshCwd === 'string' ? normalizeLinkPath(dshCwd) : '';
+  if (base !== '' && base.length <= 4096 && !/[\u0000-\u001f\u007f]/.test(base) && isAbsoluteLinkPath(base)) {
+    try {
+      // joinPath 会规范化 `.` / `..`；越出工作区的候选稍后被 isInsideFolder 拒掉。
+      out.push(vscode.Uri.joinPath(vscode.Uri.file(base), ...segments));
+    } catch {
+      // 非法 cwd：退回按工作区文件夹拼
+    }
+    if (out.length > 0) return out;
+  }
   for (const folder of folders) {
     try {
-      // joinPath 会规范化 `.` / `..`，越出工作区的候选稍后被 isInsideFolder 拒掉。
       out.push(vscode.Uri.joinPath(folder.uri, ...segments));
     } catch {
       // 非法路径：跳过该候选
@@ -3988,22 +4043,23 @@ function candidateLinkUris(p, folders) {
 
 /**
  * 把链接里的路径解析为「当前 VS Code 工作区内真实存在的文件/文件夹」。
- * 解析顺序：原样 → 去掉尾部行号（`:12` / `#L12`）再试；相对路径对每个工作区文件夹
- * 各拼一个候选，绝对路径按原样；候选一律要求落在某个工作区文件夹内且 stat 成功。
- * 这是「前提：VS Code 打开的工作区里包含该文件/文件夹」的落点。
+ * 解析顺序：原样 → 去掉尾部行号（`:12` / `#L12`）再试；相对路径按 DSH 会话 cwd 拼
+ * （无 cwd 时才对每个工作区文件夹各拼一个），绝对路径按原样；候选一律要求落在某个
+ * 工作区文件夹内且 stat 成功。这是「前提：VS Code 打开的工作区里包含该文件」的落点。
  * @param {unknown} raw 链接里的路径文本
+ * @param {unknown} [dshCwd] DSH 当前会话 cwd（客户端上报，可缺）
  * @returns {Promise<{uri: any, kind: 'file'|'folder'} | null>}
  */
-async function resolveWorkspaceTarget(raw) {
+async function resolveWorkspaceTarget(raw, dshCwd) {
   const folders = (vscode.workspace.workspaceFolders || []).filter((f) => f.uri && f.uri.scheme === 'file');
   if (folders.length === 0) return null;
   const cleaned = normalizeLinkPath(raw);
   if (cleaned === '' || cleaned.length > 4096 || /[\u0000-\u001f\u007f]/.test(cleaned)) return null;
   const variants = [cleaned];
-  const withoutLine = cleaned.replace(/[:#]L?\d+(?:-\d+)?$/i, '');
+  const withoutLine = stripLinkLineSuffix(cleaned);
   if (withoutLine !== cleaned && withoutLine !== '') variants.push(withoutLine);
   for (const v of variants) {
-    for (const uri of candidateLinkUris(v, folders)) {
+    for (const uri of candidateLinkUris(v, folders, dshCwd)) {
       if (!folders.some((f) => isInsideFolder(uri.fsPath, f.uri.fsPath))) continue;
       try {
         const stat = await vscode.workspace.fs.stat(uri);
@@ -4016,11 +4072,20 @@ async function resolveWorkspaceTarget(raw) {
   return null;
 }
 
-/** 把处理结果回执给 webview（由 webview 转发回 DSH 页面里的插件）。 */
-function replyRevealResult(webview, token, ok) {
+/**
+ * 把处理结果回执给 webview（由 webview 转发回 DSH 页面里的插件）。
+ * `reason` 是失败的短原因码（供页面侧日志定位），只允许短字符串。
+ * @param {any} webview
+ * @param {string} token
+ * @param {boolean} ok
+ * @param {string} [reason]
+ */
+function replyRevealResult(webview, token, ok, reason) {
   if (!webview || typeof webview.postMessage !== 'function') return;
   try {
-    webview.postMessage({ type: 'dsh-reveal-result', token: token, ok: ok === true });
+    const message = { type: 'dsh-reveal-result', token: token, ok: ok === true };
+    if (!ok && typeof reason === 'string' && reason !== '') message.reason = reason.slice(0, 32);
+    webview.postMessage(message);
   } catch {
     // webview 已销毁：忽略
   }
@@ -4056,10 +4121,11 @@ function hasNulByte(value) {
 }
 
 /**
- * 净化插件发来的轮坐标：只接受「会话 id + 正整数轮次」，其余一律丢弃。
+ * 净化插件发来的轮坐标：接受「会话 id + 正整数轮次」，或「会话 id + latest:true」
+ * （历史消息没有轮标记时由 DSH 插件自己找最后一次改动）。其余一律丢弃。
  * 坐标只用于在已记录清单里查，不参与任何路径拼接。
  * @param {unknown} raw
- * @returns {{sessionId: string, turn: number} | null}
+ * @returns {{sessionId: string, turn: number}|{sessionId: string, latest: true} | null}
  */
 function sanitizeChangeCoord(raw) {
   if (!raw || typeof raw !== 'object') return null;
@@ -4067,6 +4133,7 @@ function sanitizeChangeCoord(raw) {
   const rawSid = typeof raw.sessionId === 'string' ? raw.sessionId : '';
   const sid = rawSid.trim();
   if (sid === '' || sid.length > 128 || /[\u0000-\u001f\u007f]/.test(rawSid)) return null;
+  if (raw.latest === true) return { sessionId: sid, latest: true };
   const turn = Number(raw.turn);
   if (!Number.isSafeInteger(turn) || turn < 1 || turn > 1000000) return null;
   return { sessionId: sid, turn: turn };
@@ -4074,7 +4141,8 @@ function sanitizeChangeCoord(raw) {
 
 /**
  * 路径匹配候选：相对/绝对写法都试一遍（DSH 记录的 path 相对 cwd，display 可能带 ~/../）。
- * 与插件 side 的同名函数保持同一语义。
+ * 与插件 side 的 `changeCandidates` 同源；插件侧另补「折叠 `.`/`..` 的绝对路径」与
+ * 「相对 cwd 的 `../x`」两种候选（工作区外文件靠它们对上记录，见 spec 010）。
  * @param {string} cwd
  * @param {string} p
  * @returns {string[]}
@@ -4150,6 +4218,7 @@ function parseTurnChangeResponse(body) {
   return {
     ok: true,
     turn: turn,
+    latest: body.latest === true,
     display: typeof body.display === 'string' ? body.display.slice(0, 512) : '',
     before: before.text,
     after: after.text
@@ -4232,7 +4301,7 @@ async function fetchTurnChange(coord, fsPath) {
     return { ok: false, reason: 'error' };
   }
   const query = '?sessionId=' + encodeURIComponent(coord.sessionId)
-    + '&turn=' + encodeURIComponent(String(coord.turn))
+    + '&turn=' + encodeURIComponent(coord.latest === true ? 'latest' : String(coord.turn))
     + '&path=' + encodeURIComponent(fsPath);
   let body;
   try {
@@ -4325,9 +4394,11 @@ async function openVirtualDiff(before, after, label, title) {
 }
 
 /** 把降级原因变成用户可见的一句话（失败必须写「怎么办」）。 */
-function notifyDiffFallback(reason) {
+function notifyDiffFallback(reason, latest) {
   const messages = {
-    'no-change': 'DSH：本轮没有该文件的变更，已打开原文件',
+    'no-change': latest
+      ? 'DSH：该文件在本会话里没有变更记录，已打开原文件'
+      : 'DSH：本轮没有该文件的变更，已打开原文件',
     'no-record': 'DSH：该轮还没有对比数据（可能尚未结束），已退回与 HEAD 对比',
     released: 'DSH：该轮的对比数据已随会话释放，已退回与 HEAD 对比（可在 DSH 侧栏查看该轮）',
     'no-text': 'DSH：该轮的改动取不到全文（多为 shell 直接改动），已退回与 HEAD 对比',
@@ -4340,6 +4411,17 @@ function notifyDiffFallback(reason) {
   const text = messages[reason] || messages.error;
   const sticky = reason === 'unavailable' || reason === 'released';
   vscode.window.setStatusBarMessage(text, sticky ? 8000 : 6000);
+}
+
+/**
+ * 展示的是「本会话最近一次改动」而不是点击所属的轮：必须说清楚（禁止把别的轮冒充这一轮）。
+ * @param {number} turn 实际展示的轮次
+ * @param {number} [fromTurn] 点击所属轮（有则说明为何回退）
+ */
+function notifyLatestHit(turn, fromTurn) {
+  const t = Number(turn) || 0;
+  const head = fromTurn ? '第 ' + Number(fromTurn) + ' 轮没有它的变更，' : '该链接没有轮次信息，';
+  vscode.window.setStatusBarMessage('DSH：' + head + '已展示本会话最近一次改动（第 ' + t + ' 轮）', 6000);
 }
 
 /**
@@ -4364,10 +4446,11 @@ async function openDiffFor(uri, changeRaw, deps) {
     if (result && result.ok === true) {
       const label = result.display || uri.fsPath;
       await openVirtualDiff(result.before, result.after, label, buildDiffTitle(label, 'turn', result.turn));
+      if (result.latest === true) notifyLatestHit(result.turn, coord.turn);
       return true;
     }
     const reason = result && result.reason ? result.reason : 'error';
-    notifyDiffFallback(reason);
+    notifyDiffFallback(reason, coord.latest === true);
     // 二进制/超大：再拿 HEAD 对比同样没意义（内容本身不可读），直接交回调用方普通打开。
     if (reason === 'binary' || reason === 'oversized') return false;
   }
@@ -4385,27 +4468,247 @@ async function openDiffFor(uri, changeRaw, deps) {
 }
 
 /**
+ * 取数失败里「换一种写法 / 换 latest 可能命中」的原因码。
+ * - `no-change`：该轮/该写法在已记录数据里没有这个文件；
+ * - `no-record`：该轮在插件里没有记录（DOM 轮号与事件轮号可能不同源）；
+ * - `no-text`：清单里有但本轮没捕获到全文（换一轮可能有）。
+ * 其余（unavailable/released/timeout/error/binary/oversized/invalid）换什么都一样。
+ * @param {unknown} reason
+ * @returns {boolean}
+ */
+function isRetryableChangeReason(reason) {
+  return reason === 'no-change' || reason === 'no-record' || reason === 'no-text';
+}
+
+/**
+ * 把相对路径按 DSH 会话 cwd 折成绝对写法（重定向 diff 取数用）。
+ * 拿不到 cwd、或本来就是绝对路径时返回空串（不猜）。
+ * @param {string} p
+ * @param {unknown} dshCwd
+ * @returns {string}
+ */
+function absoluteFromCwd(p, dshCwd) {
+  const s = normalizeLinkPath(p);
+  if (s === '' || isAbsoluteLinkPath(s)) return '';
+  const base = typeof dshCwd === 'string' ? normalizeLinkPath(dshCwd) : '';
+  if (base === '' || base.length > 4096 || /[\u0000-\u001f\u007f]/.test(base) || !isAbsoluteLinkPath(base)) return '';
+  try {
+    return path.resolve(base, s).replace(/\\/g, '/');
+  } catch {
+    return '';
+  }
+}
+
+/**
+ * 工作区外（或已被删除）的文件：只用 DSH 自己记录的轮级两侧全文打开 diff（规格 010）。
+ *
+ * 为什么只做 P1：两侧内容全部来自 `dsh-vscode-changes` 的记录，宿主不读盘、不在资源管理器
+ * 定位；而 P0（git HEAD ↔ 工作树）必须在该文件所在目录跑 git，等于把读盘扩展到工作区外，
+ * 所以这里**不退 P0**，取不到就交回 DSH 自己。
+ *
+ * 取数尝试链（规格 011）：写法 [原文 → 去行号 → 按 DSH cwd 拼的绝对路径] × 坐标
+ * [点击所属轮 → latest]。只有「换一种写法 / 换一轮可能命中」的原因（见
+ * `isRetryableChangeReason`）才继续；不可用/超时之类换什么都一样，直接收工。
+ *
+ * @param {unknown} rawPath 链接里的原始路径文本
+ * @param {unknown} changeRaw 轮坐标（可缺）
+ * @param {unknown} [dshCwd] DSH 当前会话 cwd（客户端上报，可缺）
+ * @returns {Promise<{ok: true} | {ok: false, reason: string}>}
+ */
+async function openOutOfWorkspaceDiff(rawPath, changeRaw, dshCwd) {
+  const cleaned = normalizeLinkPath(rawPath);
+  if (cleaned === '' || cleaned.length > 4096 || /[\u0000-\u001f\u007f]/.test(cleaned)) {
+    return { ok: false, reason: 'invalid' };
+  }
+  const coord = sanitizeChangeCoord(changeRaw);
+  // 会话都没有就不猜；只有轮次缺失时还能用 latest 问 DSH「最后一次改动是哪一轮」。
+  if (!coord) return { ok: false, reason: 'no-coord' };
+  const paths = [cleaned];
+  const withoutLine = stripLinkLineSuffix(cleaned);
+  if (withoutLine !== cleaned && withoutLine !== '') paths.push(withoutLine);
+  const abs = absoluteFromCwd(cleaned, dshCwd);
+  if (abs !== '' && !paths.includes(abs)) paths.push(abs);
+  const coords = [coord];
+  if (coord.turn) coords.push({ sessionId: coord.sessionId, latest: true });
+  const d = diffDeps();
+  const fetchChange = typeof d.fetchTurnChange === 'function' ? d.fetchTurnChange : fetchTurnChange;
+  let last = { ok: false, reason: 'error', turn: 0 };
+  for (const c of coords) {
+    for (const p of paths) {
+      let result;
+      try {
+        result = await fetchChange(c, p);
+      } catch {
+        result = { ok: false, reason: 'error' };
+      }
+      if (result && result.ok === true) {
+        const label = result.display || p;
+        try {
+          await openVirtualDiff(result.before, result.after, label, buildDiffTitle(label, 'turn', result.turn));
+        } catch {
+          return { ok: false, reason: 'error' };
+        }
+        // 用的不是点击所在轮时，必须说清楚（否则用户会把别的轮当成这一轮）。
+        // 传入的是「点击所属轮」而不是当前尝试的坐标：latest 坐标本身没有 turn。
+        if (result.latest === true) notifyLatestHit(result.turn, coord.turn);
+        return { ok: true };
+      }
+      last = result && typeof result === 'object' ? result : { ok: false, reason: 'error' };
+      if (!isRetryableChangeReason(last.reason)) break;
+    }
+    if (!isRetryableChangeReason(last.reason)) break;
+  }
+  return { ok: false, reason: last.reason || 'error' };
+}
+
+/**
+ * 工作区外目标的「对比 → 打开」兜底（只在 `dshPanel.outOfWorkspaceFileAccess` 开启时生效）。
+ *
+ * 为什么需要：DSH 的轮级变更记录只在进程内存里，`dsh web` 重启后（或会话被卸载后）
+ * 就拿不到，而工作区外文件本来就没有 P0/L0 兜底，于是只剩「退回 DSH 侧栏」一条路。
+ * 开启后按与工作区内一致的顺序降级：git HEAD ↔ 当前内容 → 普通打开（`revealOnly` 只定位）。
+ * 红线：仅在用户显式开启时执行，因为这是把模型给的路径交给编辑器/ git。
+ * @param {unknown} rawPath 链接里的路径文本
+ * @param {unknown} dshCwd DSH 会话 cwd（相对路径的基准）
+ * @param {string} [action] 当前点击行为
+ * @returns {Promise<boolean>} 是否已在 VS Code 里处理
+ */
+async function openOutOfWorkspaceFallback(rawPath, dshCwd, action) {
+  const mode = typeof action === 'string' && FILE_LINK_ACTIONS.includes(action) ? action : 'revealAndOpen';
+  const cleaned = normalizeLinkPath(rawPath);
+  if (cleaned === '' || cleaned.length > 4096 || /[\u0000-\u001f\u007f]/.test(cleaned)) return false;
+  const abs = isAbsoluteLinkPath(cleaned) ? cleaned : absoluteFromCwd(cleaned, dshCwd);
+  if (abs === '') return false;
+  let uri;
+  try {
+    uri = vscode.Uri.file(abs);
+  } catch {
+    return false;
+  }
+  // 必须真实存在才交给 VS Code：不存在的路径（模型看错/已删除）没有任何可看的东西。
+  let isDir = false;
+  try {
+    const stat = await vscode.workspace.fs.stat(uri);
+    isDir = stat.type === vscode.FileType.Directory;
+  } catch {
+    return false;
+  }
+  if (mode === 'revealOnly') {
+    await vscode.commands.executeCommand('revealInExplorer', uri);
+    return true;
+  }
+  if (isDir) {
+    await vscode.commands.executeCommand('revealInExplorer', uri);
+    return true;
+  }
+  if (isDiffMode(mode)) {
+    let base = null;
+    try {
+      const deps = diffDeps();
+      const readHead = typeof deps.readGitHeadBaseline === 'function' ? deps.readGitHeadBaseline : readGitHeadBaseline;
+      base = await readHead(uri, deps);
+    } catch {
+      base = null;
+    }
+    if (base) {
+      const text = base.kind === 'absent' ? '' : String(base.text || '');
+      const left = storeDiffDoc('head-' + path.basename(uri.fsPath), text);
+      await vscode.commands.executeCommand('vscode.diff', left, uri, buildDiffTitle(uri.fsPath, 'head'), { preview: false, preserveFocus: false });
+      return true;
+    }
+  }
+  await vscode.commands.executeCommand('vscode.open', uri, { preview: false, preserveFocus: false });
+  return true;
+}
+
+/**
+ * 工作区外链接没能接管时的一句话（失败必须可见，并写清「怎么办」）。
+ * @param {unknown} rawPath
+ * @param {string} reason openOutOfWorkspaceDiff 的原因码，或 `not-diff-mode`
+ */
+function notifyOutOfWorkspaceLink(rawPath, reason) {
+  const shown = typeof rawPath === 'string' ? rawPath : '';
+  const short = shown.length > 60 ? shown.slice(0, 57) + '…' : shown;
+  if (reason === 'not-diff-mode') {
+    vscode.window.setStatusBarMessage(
+      '链接不在当前 VS Code 工作区内（或文件不存在），无法在资源管理器中定位：已在 DSH 侧栏打开。'
+      + '把 dshPanel.workspaceFileLinkAction 设为 diffAndOpen 可看该轮变更'
+      + (short === '' ? '' : '：' + short),
+      8000
+    );
+    return;
+  }
+  const reasons = {
+    invalid: '路径无法识别',
+    'no-coord': '且无法确定它属于哪一轮',
+    'no-change': '该轮没有它的变更记录',
+    'no-record': '该轮的对比数据还没准备好（可能尚未结束）',
+    released: '该轮的对比数据已随会话释放',
+    'no-text': '该轮的改动取不到全文（多为 shell 直接改动）',
+    binary: '文件是二进制，无法并排对比',
+    oversized: '文件超过 1 MiB，无法并排对比',
+    timeout: '取数超时',
+    unavailable: '轮级对比需要重启 dsh web 后生效',
+    error: '取数失败'
+  };
+  let text = '该文件在 VS Code 工作区外，' + (reasons[reason] || reasons.error) + '：已在 DSH 侧栏打开';
+  if (reason === 'released' || reason === 'no-record') {
+    text += '（该会话的变更记录已随 dsh web 重启丢失）';
+  }
+  if (reason === 'unavailable') text += '（命令面板：DeepSeek Harness: 重启 dsh web）';
+  if (!allowOutOfWorkspaceAccess()) {
+    text += '；把 dshPanel.outOfWorkspaceFileAccess 设为 true 可直接在 VS Code 打开该文件';
+  }
+  vscode.window.setStatusBarMessage(text, reason === 'unavailable' || reason === 'released' ? 10000 : 8000);
+}
+
+/**
  * 处理「DSH 对话里点击工作区文件/文件夹链接」：在当前窗口的 VS Code 资源管理器中
  * 定位并打开，再把结果回执给 webview。
  *
- * 只有确认能打开（目标在当前工作区内且真实存在）才回执成功；否则回执失败，DSH 页面里
- * 的插件会回放原始点击，保持 DSH 自身行为（在 DSH 侧边栏打开）——不会出现点了没反应。
+ * 只有确认能打开（目标在当前工作区内且真实存在）才走「定位 + 打开」主链路；否则回执失败，
+ * DSH 页面里的插件会回放原始点击，保持 DSH 自身行为（在 DSH 侧边栏打开）——不会出现点了没反应。
+ * 唯一例外是 diff 模式且目标是工作区外/已删除文件：这时用 DSH 的轮级记录开 diff（spec 010），
+ * 因为它不读盘、不定位，不扩大 001 的安全边界。
  * @param {{token?: unknown, path?: unknown, change?: unknown}} msg
  * @param {any} webview 发起请求的 webview（侧边栏视图或编辑器标签页）
  */
 async function revealWorkspaceTarget(msg, webview) {
   const token = typeof msg.token === 'string' ? msg.token.slice(0, 64) : '';
+  const action = fileLinkAction();
+  // 客户端上报的 DSH 会话 cwd：相对链接的基准（规格 011）。缺了就退回旧的多根猜测。
+  const dshCwd = typeof msg.cwd === 'string' ? msg.cwd : '';
   let target = null;
-  if (fileLinkAction() !== 'off') {
-    target = await resolveWorkspaceTarget(msg.path);
+  if (action !== 'off') {
+    target = await resolveWorkspaceTarget(msg.path, dshCwd);
   }
   if (!target) {
+    if (action === 'off') {
+      // 用户显式要求不接管：连提示都不给，静默交回 DSH。
+      replyRevealResult(webview, token, false);
+      return;
+    }
+    if (isDiffMode(action)) {
+      const attempt = await openOutOfWorkspaceDiff(msg.path, msg.change, dshCwd);
+      if (attempt.ok === true) {
+        replyRevealResult(webview, token, true);
+        return;
+      }
+      // 显式开启「工作区外文件也交给 VS Code」时，继续走 P0 → L0（轮级数据没了也能看）。
+      if (allowOutOfWorkspaceAccess() && (await openOutOfWorkspaceFallback(msg.path, dshCwd, action))) {
+        replyRevealResult(webview, token, true);
+        return;
+      }
+      replyRevealResult(webview, token, false, attempt.reason);
+      notifyOutOfWorkspaceLink(msg.path, attempt.reason);
+      return;
+    }
+    if (allowOutOfWorkspaceAccess() && (await openOutOfWorkspaceFallback(msg.path, dshCwd, action))) {
+      replyRevealResult(webview, token, true);
+      return;
+    }
     replyRevealResult(webview, token, false);
-    const shown = typeof msg.path === 'string' ? msg.path : '';
-    vscode.window.setStatusBarMessage(
-      'DSH 链接不在当前 VS Code 工作区内：' + (shown.length > 60 ? shown.slice(0, 57) + '…' : shown),
-      4000
-    );
+    notifyOutOfWorkspaceLink(msg.path, 'not-diff-mode');
     return;
   }
   await vscode.commands.executeCommand('revealInExplorer', target.uri);
@@ -6601,6 +6904,14 @@ module.exports.__internals = {
   diffDocCount,
   setDiffDeps,
   openDiffFor,
+  openOutOfWorkspaceDiff,
+  openOutOfWorkspaceFallback,
+  allowOutOfWorkspaceAccess,
+  notifyOutOfWorkspaceLink,
+  isRetryableChangeReason,
+  absoluteFromCwd,
+  candidateLinkUris,
+  stripLinkLineSuffix,
   readGitHeadBaseline,
   fetchTurnChange,
   httpGetJson,

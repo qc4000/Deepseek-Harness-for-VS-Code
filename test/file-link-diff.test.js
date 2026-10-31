@@ -16,6 +16,8 @@ const os = require('os');
 const Module = require('module');
 
 const ACTION_KEY = 'dshPanel.workspaceFileLinkAction';
+// 工作区外文件是否交给 VS Code（默认关闭；规格 011 补充）
+const ACCESS_KEY = 'dshPanel.outOfWorkspaceFileAccess';
 const executed = [];
 const statusMessages = [];
 const infoMessages = [];
@@ -324,6 +326,283 @@ async function runCase(change, deps) {
   await new Promise((r4) => setTimeout(r4, 150));
   ok(!executed.some((c) => c[0] === 'vscode.diff'), 'revealAndOpen 不进入 diff 逻辑（AC-8）');
   ok(executed.some((c) => c[0] === 'vscode.open'), 'revealAndOpen 仍为普通打开');
+
+  // ── [6] 工作区外链接（规格 010） ─────────────────────────────
+  console.log('[6] 工作区外链接：只用 DSH 记录出 diff，不读盘');
+  // 工作区外目标：不在 REPO 下、也不需要真实存在（原文件能否打开不是本链路的前提）。
+  const outsideRaw = path.join(os.tmpdir(), 'dsh-010-outside', 'a.ts');
+  const outsideLink = outsideRaw.replace(/\\/g, '/');
+
+  executed.length = 0;
+  statusMessages.length = 0;
+  let fetchedPaths = [];
+  let gitQueried = false;
+  I.setDiffDeps({
+    fetchTurnChange: async (coord, p) => {
+      fetchedPaths.push(p);
+      return { ok: true, turn: 5, display: '../../dsh-010-outside/a.ts', before: 'old\n', after: 'new\n' };
+    },
+    readGitHeadBaseline: async () => { gitQueried = true; return null; }
+  });
+  let out = await I.openOutOfWorkspaceDiff(outsideRaw, { sessionId: 's1', turn: 5 });
+  ok(out.ok === true, '工作区外命中 → ok=true（插件不回放点击）');
+  const outDiff = executed.find((c) => c[0] === 'vscode.diff');
+  ok(!!outDiff && outDiff[3] === 'a.ts · 第 5 轮', '工作区外 diff 标题写「第 N 轮」');
+  ok(diffProvider.provider.provideTextDocumentContent(outDiff[1]) === 'old\n'
+    && diffProvider.provider.provideTextDocumentContent(outDiff[2]) === 'new\n', '左右取自该轮记录');
+  ok(!executed.some((c) => c[0] === 'revealInExplorer'), '工作区外不经资源管理器定位');
+  ok(gitQueried === false, '工作区外不跑 HEAD 对比（不读本地磁盘）');
+  ok(fetchedPaths[0] === outsideLink, '路由收到的是链接原文（不做绝对化猜测）');
+
+  // 行号后缀：原文未命中才去后缀重查一次（AC-3）
+  fetchedPaths = [];
+  executed.length = 0;
+  I.setDiffDeps({
+    fetchTurnChange: async (coord, p) => {
+      fetchedPaths.push(p);
+      if (p.endsWith(':12')) return { ok: false, reason: 'no-change' };
+      return { ok: true, turn: 2, display: 'a.ts', before: '', after: 'x\n' };
+    },
+    readGitHeadBaseline: async () => null
+  });
+  out = await I.openOutOfWorkspaceDiff(outsideRaw + ':12', { sessionId: 's1', turn: 2 });
+  ok(out.ok === true && fetchedPaths.length === 2, '带行号后缀：原样未命中 → 去后缀重试一次');
+  ok(fetchedPaths[1] === outsideLink, '重试时用的是去掉 :12 的路径');
+  ok(executed.some((c) => c[0] === 'vscode.diff'), '重试命中即打开 diff');
+
+  // 无坐标 / 非法坐标：不猜会话与轮（AC-4）
+  let requested = false;
+  I.setDiffDeps({
+    fetchTurnChange: async () => { requested = true; return { ok: true, turn: 1, before: '', after: '' }; },
+    readGitHeadBaseline: async () => null
+  });
+  out = await I.openOutOfWorkspaceDiff(outsideRaw, null);
+  ok(out.ok === false && out.reason === 'no-coord', '无坐标 → ok=false / no-coord');
+  out = await I.openOutOfWorkspaceDiff(outsideRaw, { sessionId: 's1', turn: 0 });
+  ok(out.ok === false && out.reason === 'no-coord' && requested === false, '非法坐标不请求路由（AC-4）');
+  out = await I.openOutOfWorkspaceDiff('   ', { sessionId: 's1', turn: 1 });
+  ok(out.ok === false && out.reason === 'invalid' && requested === false, '空/空白路径直接拒绝');
+  out = await I.openOutOfWorkspaceDiff('a'.repeat(5000), { sessionId: 's1', turn: 1 });
+  ok(out.ok === false && out.reason === 'invalid', '超长路径拒绝（沿用 001 净身）');
+
+  // 各失败原因 → 定向文案（AC-5）
+  statusMessages.length = 0;
+  I.notifyOutOfWorkspaceLink(outsideRaw, 'no-change');
+  I.notifyOutOfWorkspaceLink(outsideRaw, 'unavailable');
+  I.notifyOutOfWorkspaceLink(outsideRaw, 'no-coord');
+  I.notifyOutOfWorkspaceLink(outsideRaw, 'binary');
+  ok(statusMessages.length === 4, '每种失败都有一条状态栏提示（不静默）');
+  ok(statusMessages.every((t) => t.includes('工作区外')), '提示都点明「工作区外」这一前提');
+  ok(statusMessages.every((t) => t.includes('DSH 侧栏')), '提示都说清后续落在哪（DSH 侧栏）');
+  ok(statusMessages.some((t) => t.includes('重启 dsh web')), '不可用时给出下一步动作（重启 dsh web）');
+
+  // 消息链路：diffAndOpen + 工作区外路径 → 回执成功、不定位（AC-1）
+  configValues[ACTION_KEY] = 'diffAndOpen';
+  received.length = 0;
+  executed.length = 0;
+  statusMessages.length = 0;
+  I.setDiffDeps({
+    fetchTurnChange: async () => ({ ok: true, turn: 4, display: 'a.ts', before: 'p', after: 'q' }),
+    readGitHeadBaseline: async () => { throw new Error('工作区外不应读盘'); }
+  });
+  I.handleWebviewMessage({ type: 'dsh-reveal-path', token: 'tk20', path: outsideRaw, change: { sessionId: 's1', turn: 4 } }, wv);
+  await new Promise((r5) => setTimeout(r5, 200));
+  ok(executed.some((c) => c[0] === 'vscode.diff'), '工作区外链接在 VS Code 打开 diff');
+  ok(!executed.some((c) => c[0] === 'revealInExplorer'), '工作区外链接不定位资源管理器');
+  const outResults = received.filter((m) => m.type === 'dsh-reveal-result');
+  ok(outResults.length === 1 && outResults[0].ok === true && outResults[0].token === 'tk20', '回执 ok=true（DSH 侧栏不再打开）');
+
+  // 未命中 → 回执失败 + 提示（AC-2）
+  received.length = 0;
+  executed.length = 0;
+  statusMessages.length = 0;
+  I.setDiffDeps({
+    fetchTurnChange: async () => ({ ok: false, reason: 'no-change' }),
+    readGitHeadBaseline: async () => null
+  });
+  I.handleWebviewMessage({ type: 'dsh-reveal-path', token: 'tk21', path: outsideRaw, change: { sessionId: 's1', turn: 4 } }, wv);
+  await new Promise((r6) => setTimeout(r6, 200));
+  const missResults = received.filter((m) => m.type === 'dsh-reveal-result');
+  ok(missResults.length === 1 && missResults[0].ok === false, '未命中回执 ok=false（插件回放、DSH 侧栏照旧）');
+  ok(missResults[0].reason === 'no-change', '失败回执带原因码（页面日志可定位）');
+  ok(executed.length === 0, '未命中不执行任何编辑器命令');
+  ok(statusMessages.some((t) => t.includes('工作区外')), '未命中给出「工作区外」提示');
+
+  // 非 diff 模式：行为与 1.0.6 一致，但提示给出出路（AC-6）
+  for (const mode of ['revealAndOpen', 'revealOnly']) {
+    configValues[ACTION_KEY] = mode;
+    received.length = 0;
+    executed.length = 0;
+    statusMessages.length = 0;
+    let queriedNow = false;
+    I.setDiffDeps({
+      fetchTurnChange: async () => { queriedNow = true; return { ok: true, turn: 4, before: '', after: '' }; },
+      readGitHeadBaseline: async () => null
+    });
+    I.handleWebviewMessage({ type: 'dsh-reveal-path', token: 'tk22', path: outsideRaw, change: { sessionId: 's1', turn: 4 } }, wv);
+    await new Promise((r7) => setTimeout(r7, 150));
+    const modeResults = received.filter((m) => m.type === 'dsh-reveal-result');
+    ok(modeResults.length === 1 && modeResults[0].ok === false, mode + '：工作区外仍回执 ok=false');
+    ok(queriedNow === false, mode + '：不取轮级数据');
+    ok(executed.length === 0, mode + '：不开编辑器也不定位');
+    ok(statusMessages.some((t) => t.includes('diffAndOpen')), mode + '：提示「改成 diffAndOpen 可看该轮变更」');
+  }
+
+  I.setDiffDeps(null);
+  // ── [7] latest 坐标与 cwd 候选（规格 011） ───────────────────
+  console.log('[7] latest 坐标与 cwd 候选（老会话仍能看变更）');
+  ok(I.sanitizeChangeCoord({ sessionId: 's1', latest: true }).latest === true, 'sanitizeChangeCoord 接受 latest（无 turn）');
+  ok(I.sanitizeChangeCoord({ sessionId: 's1', latest: true, turn: 0 }).latest === true, 'latest 优先于非法 turn');
+  ok(I.sanitizeChangeCoord({ sessionId: '', latest: true }) === null, 'latest 也要有 sessionId');
+  const cwdOutside = process.platform === 'win32' ? 'C:/w/other' : '/w/other';
+  ok(I.absoluteFromCwd('src/a.ts', cwdOutside) === cwdOutside + '/src/a.ts', 'absoluteFromCwd 按 DSH cwd 折绝对路径');
+  ok(I.absoluteFromCwd(cwdOutside + '/a.ts', cwdOutside) === '', '本来就是绝对路径时不折（返回空串）');
+  ok(I.absoluteFromCwd('src/a.ts', '') === '', '没有 cwd 时不折');
+
+  let asked = [];
+  executed.length = 0;
+  statusMessages.length = 0;
+  I.setDiffDeps({
+    fetchTurnChange: async (c, p) => {
+      asked.push({ c, p });
+      return { ok: true, turn: 9, latest: true, display: 'a.ts', before: 'x', after: 'y' };
+    },
+    readGitHeadBaseline: async () => null
+  });
+  out = await I.openOutOfWorkspaceDiff(outsideRaw, { sessionId: 's1', latest: true });
+  ok(out.ok === true && asked.length === 1, 'latest 坐标直接查询一次');
+  ok(asked[0].c.latest === true && asked[0].c.turn === undefined, 'latest 请求不带 turn（不猜轮次）');
+  ok(statusMessages.some((t) => t.includes('最近一次改动')), 'latest 命中提示「已展示本会话最近一次改动」');
+  ok(executed.some((c) => c[0] === 'vscode.diff'), 'latest 命中同样开 diff');
+
+  // 指定轮没有该文件 → 自动改用 latest 再查一次
+  asked = [];
+  executed.length = 0;
+  statusMessages.length = 0;
+  I.setDiffDeps({
+    fetchTurnChange: async (c, p) => {
+      asked.push({ c, p });
+      if (c.latest !== true) return { ok: false, reason: 'no-change' };
+      return { ok: true, turn: 4, latest: true, display: 'a.ts', before: '', after: 'z' };
+    },
+    readGitHeadBaseline: async () => null
+  });
+  out = await I.openOutOfWorkspaceDiff(outsideRaw, { sessionId: 's1', turn: 3 }, cwdOutside);
+  ok(out.ok === true, '该轮无变更 → 改按 latest 再查一次并命中');
+  ok(asked.some((a) => a.c.latest === true), '确实发出了 latest 请求');
+  ok(statusMessages.some((t) => t.includes('第 3 轮没有它的变更')), '提示说明为何展示的是别的轮');
+
+  // 相对路径：把「按 DSH cwd 拼的绝对写法」当候选之一
+  asked = [];
+  executed.length = 0;
+  I.setDiffDeps({
+    fetchTurnChange: async (c, p) => { asked.push(p); return { ok: false, reason: 'no-change' }; },
+    readGitHeadBaseline: async () => null
+  });
+  out = await I.openOutOfWorkspaceDiff('src/a.ts', { sessionId: 's1', turn: 2 }, cwdOutside);
+  ok(asked.includes(cwdOutside + '/src/a.ts'), '相对路径额外按 DSH cwd 拼绝对候选');
+  ok(out.ok === false && out.reason === 'no-change', '都没命中 → 交回 DSH 侧栏');
+
+  // 不可用类错误不再白跑：只打一次
+  asked = [];
+  I.setDiffDeps({
+    fetchTurnChange: async (c, p) => { asked.push({ c, p }); return { ok: false, reason: 'unavailable' }; },
+    readGitHeadBaseline: async () => null
+  });
+  out = await I.openOutOfWorkspaceDiff('src/a.ts', { sessionId: 's1', turn: 2 }, cwdOutside);
+  ok(out.reason === 'unavailable' && asked.length === 1, '不可用时不再换写法/换坐标重试');
+
+  // no-record / no-text 也要继续换 latest（DOM 轮号与事件轮号可能不同源、本轮可能没捕获）
+  ok(I.isRetryableChangeReason('no-change') === true && I.isRetryableChangeReason('no-record') === true
+    && I.isRetryableChangeReason('no-text') === true, '可重试原因：no-change / no-record / no-text');
+  ok(I.isRetryableChangeReason('unavailable') === false && I.isRetryableChangeReason('released') === false
+    && I.isRetryableChangeReason('timeout') === false, '不可重试原因：unavailable / released / timeout');
+  asked = [];
+  executed.length = 0;
+  I.setDiffDeps({
+    fetchTurnChange: async (c, p) => {
+      asked.push({ c, p });
+      if (c.latest !== true) return { ok: false, reason: 'no-record' };
+      return { ok: true, turn: 5, latest: true, display: 'a.ts', before: '', after: 'k' };
+    },
+    readGitHeadBaseline: async () => null
+  });
+  out = await I.openOutOfWorkspaceDiff(outsideRaw, { sessionId: 's1', turn: 9 }, cwdOutside);
+  ok(out.ok === true && asked.some((a) => a.c.latest === true), 'no-record 时也换 latest 再查');
+
+  I.setDiffDeps(null);
+  // ── [8] 工作区外文件交给 VS Code（opt-in） ───────────────────
+  // DSH 的轮级记录只在内存，重启即失；工作区外文件没有 P0/L0 兜底，
+  // 所以提供显式开关：开启后按「git HEAD 对比 → 普通打开」降级。
+  console.log('[8] outOfWorkspaceFileAccess（默认关闭）');
+  configValues[ACTION_KEY] = 'diffAndOpen';
+  delete configValues[ACCESS_KEY];
+  ok(I.allowOutOfWorkspaceAccess() === false, '默认不把工作区外文件交给 VS Code');
+
+  // 工作区外的真实文件（REPO 之外的临时目录）：开关只认「存在」，不认是否在工作区内。
+  const outDir = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-out-access-'));
+  const existsFile = path.join(outDir, 'a.py');
+  fs.writeFileSync(existsFile, 'print(1)\n');
+  executed.length = 0;
+  statusMessages.length = 0;
+  I.setDiffDeps({
+    fetchTurnChange: async () => ({ ok: false, reason: 'released' }),
+    readGitHeadBaseline: async () => { throw new Error('默认关闭时不应读盘'); }
+  });
+  I.handleWebviewMessage({ type: 'dsh-reveal-path', token: 'tka', path: existsFile, change: { sessionId: 's1', turn: 1 } }, wv);
+  await new Promise((r8) => setTimeout(r8, 200));
+  ok(executed.length === 0, '默认关闭：不打开、不定位');
+  ok(statusMessages.some((t) => t.includes('outOfWorkspaceFileAccess')), '提示里给出开关出路');
+  ok(statusMessages.some((t) => t.includes('重启')), 'released 时说明「变更记录已随 dsh web 重启丢失」');
+
+  // 开启 + diffAndOpen：P1 拿不到 → git HEAD 对比
+  configValues[ACCESS_KEY] = true;
+  ok(I.allowOutOfWorkspaceAccess() === true, '开关生效');
+  executed.length = 0;
+  I.setDiffDeps({
+    fetchTurnChange: async () => ({ ok: false, reason: 'released' }),
+    readGitHeadBaseline: async () => ({ kind: 'text', text: 'head\n' })
+  });
+  I.handleWebviewMessage({ type: 'dsh-reveal-path', token: 'tkb', path: existsFile, change: { sessionId: 's1', turn: 1 } }, wv);
+  await new Promise((r9) => setTimeout(r9, 200));
+  const optDiff = executed.find((c) => c[0] === 'vscode.diff');
+  ok(!!optDiff, '开启后：轮级没了也能开「与 HEAD 的差异」');
+  ok(optDiff[3] === 'a.py · 与 HEAD 的差异', '标题写明与 HEAD 的差异');
+  ok(!executed.some((c) => c[0] === 'revealInExplorer'), '工作区外不定位资源管理器');
+
+  // 开启但没有 git 改动 → 普通打开
+  executed.length = 0;
+  I.setDiffDeps({
+    fetchTurnChange: async () => ({ ok: false, reason: 'released' }),
+    readGitHeadBaseline: async () => null
+  });
+  I.handleWebviewMessage({ type: 'dsh-reveal-path', token: 'tkc', path: existsFile, change: { sessionId: 's1', turn: 1 } }, wv);
+  await new Promise((r10) => setTimeout(r10, 200));
+  ok(executed.some((c) => c[0] === 'vscode.open'), '无 git 改动 → 直接打开文件');
+
+  // 开启 + revealAndOpen → 直接打开；revealOnly → 只定位
+  configValues[ACTION_KEY] = 'revealAndOpen';
+  executed.length = 0;
+  I.handleWebviewMessage({ type: 'dsh-reveal-path', token: 'tkd', path: existsFile }, wv);
+  await new Promise((r11) => setTimeout(r11, 150));
+  ok(executed.length === 1 && executed[0][0] === 'vscode.open', 'revealAndOpen：工作区外文件直接打开');
+  configValues[ACTION_KEY] = 'revealOnly';
+  executed.length = 0;
+  I.handleWebviewMessage({ type: 'dsh-reveal-path', token: 'tke', path: existsFile }, wv);
+  await new Promise((r12) => setTimeout(r12, 150));
+  ok(executed.length === 1 && executed[0][0] === 'revealInExplorer', 'revealOnly：只定位');
+
+  // 目标不存在 → 不接管
+  configValues[ACTION_KEY] = 'diffAndOpen';
+  executed.length = 0;
+  received.length = 0;
+  I.handleWebviewMessage({ type: 'dsh-reveal-path', token: 'tkf', path: path.join(REPO, 'no-such-file.xyz') }, wv);
+  await new Promise((r13) => setTimeout(r13, 150));
+  ok(executed.length === 0, '不存在的路径不交给 VS Code');
+  ok(received.some((m) => m.type === 'dsh-reveal-result' && m.ok === false), '回执失败（插件回放）');
+  delete configValues[ACCESS_KEY];
+  configValues[ACTION_KEY] = 'diffAndOpen';
+  fs.rmSync(outDir, { recursive: true, force: true });
 
   I.setDiffDeps(null);
   console.log('\n全部通过：' + passed + ' 项断言 ✓');
