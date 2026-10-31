@@ -27,7 +27,7 @@ window.__ModuleLoader__.load({ id: 'dsh-vscode-file-links', factory: (require) =
   var module = { exports: {} }
   var exports = module.exports
 
-  var PLUGIN_VERSION = '0.2.5'
+  var PLUGIN_VERSION = '0.2.7'
   // 父级 webview（VS Code 扩展）的身份标记：iframe name 属性 + 消息 source 字段。
   var HOST_ID = 'dsh-vscode-host'
   var SELF_ID = 'dsh-vscode-file-links'
@@ -54,6 +54,11 @@ window.__ModuleLoader__.load({ id: 'dsh-vscode-file-links', factory: (require) =
   // 客户端根上下文：用于读「当前会话 id」（取不到就不带坐标，不阻断点击）。
   var rootCtx = null
   var pending = {}
+  // 诊断环形日志（规格 011）：最近若干次点击的【输入 + 结果】，不写磁盘、不含文件内容。
+  // 用途：用户报「点了就开 DSH 侧栏」时，一行 __dshVscodeFileLinks.log() 就能看到
+  // 是「没有轮标记」「cwd 缺失」还是「宿主回了失败」，不用猜。
+  var trace = []
+  var TRACE_MAX = 20
 
   /** 是否被宿主内嵌（独立浏览器里 parent === self）。 */
   function inIframe() {
@@ -215,6 +220,52 @@ window.__ModuleLoader__.load({ id: 'dsh-vscode-file-links', factory: (require) =
   }
 
   /**
+   * 取某服务的列表快照（服务缺失/未就绪时返回 null）。
+   * @param {string} name
+   * @returns {any}
+   */
+  function snapshotOf(name) {
+    var service = serviceOf(name)
+    try {
+      if (service && service.list && typeof service.list.getSnapshot === 'function') {
+        return service.list.getSnapshot()
+      }
+    } catch (e) { /* 快照未就绪 */ }
+    return null
+  }
+
+  /**
+   * 当前主视图会话的 cwd：DSH 把链接渲染成「相对会话 cwd」的相对路径，宿主拿它做基准
+   * （规格 011——不拿 cwd 就只能拿 VS Code 文件夹瞎猜，会定位到同名的另一个文件）。
+   * 与 dsh-vscode-workspace 同源：uiSession.current 优先，再退回 retainedBy.mainView。
+   * @returns {string} 取不到返回空串（宿主会退回旧的多根猜测）
+   */
+  function currentSessionCwd() {
+    if (!rootCtx) return ''
+    var snap = snapshotOf('sessions')
+    var byId = snap && snap.byId
+    if (!byId) return ''
+    try {
+      var ui = serviceOf('uiSession')
+      var current = ui && ui.current && typeof ui.current.getSnapshot === 'function' ? ui.current.getSnapshot() : null
+      var key = current && (current.key || current.sessionId || (current.binding && current.binding.sessionId))
+      if (typeof key === 'string' && byId[key] && typeof byId[key].cwd === 'string') {
+        return byId[key].cwd.slice(0, PATH_MAX_LENGTH)
+      }
+    } catch (e) { /* 老版本没有该服务：走保留计数 */ }
+    try {
+      for (var id in byId) {
+        if (!Object.prototype.hasOwnProperty.call(byId, id)) continue
+        var row = byId[id]
+        if (row && row.retainedBy && row.retainedBy.mainView > 0 && typeof row.cwd === 'string') {
+          return row.cwd.slice(0, PATH_MAX_LENGTH)
+        }
+      }
+    } catch (e2) { /* 取不到就不带 */ }
+    return ''
+  }
+
+  /**
    * 当前主视图会话 id（DSH 会话流按主视图保留计数标出当前会话）。
    * 取不到返回空串：宁可退回 HEAD 对比，也不能猜错会话。
    */
@@ -243,13 +294,19 @@ window.__ModuleLoader__.load({ id: 'dsh-vscode-file-links', factory: (require) =
     return ''
   }
   
-  /** diff 模式下的轮坐标：会话或轮任一缺失就返回 null。 */
+  /**
+   * diff 模式下的轮坐标。
+   * - 有会话 + 有轮标记 → `{sessionId, turn}`；
+   * - 有会话但没轮标记（历史消息常见）→ `{sessionId, latest:true}`，由 DSH 插件
+   *   在已记录的清单里找「这个文件最后一次改动」（规格 011）——比直接放弃好得多；
+   * - 会话都没有 → null（不猜）。
+   */
   function coordsOf(button) {
     if (!diffMode) return null
-    var turn = turnOf(button)
-    if (turn === 0) return null
     var sessionId = currentSessionId()
     if (sessionId === '') return null
+    var turn = turnOf(button)
+    if (turn === 0) return { sessionId: sessionId, latest: true }
     return { sessionId: sessionId, turn: turn }
   }
   
@@ -267,18 +324,36 @@ window.__ModuleLoader__.load({ id: 'dsh-vscode-file-links', factory: (require) =
     replaying = false
   }
   
+  /** 记一条诊断（定长环形，只存字段摘要，不存文件内容）。 */
+  function traceAdd(record) {
+    record.at = Date.now()
+    trace.push(record)
+    while (trace.length > TRACE_MAX) trace.shift()
+    return record
+  }
+
   function requestReveal(button, path, change) {
     var token = nextToken()
+    var entry = traceAdd({
+      path: path,
+      cwd: currentSessionCwd(),
+      change: change || null,
+      result: 'pending'
+    })
     pending[token] = {
       el: button,
+      trace: entry,
       // 宿主取轮级数据可能比默认超时慢：收到 reveal-ack 后才把等待放宽。
       timer: window.setTimeout(function () {
         delete pending[token]
+        entry.result = 'timeout'
         // 宿主没回执（面板关闭 / 扩展未升级）：回放点击，行为退回 DSH 自身。
         replayClick(button)
       }, REVEAL_TIMEOUT_MS)
     }
     var message = { type: 'reveal', token: token, path: path }
+    // DSH 会话 cwd：相对链接的基准（规格 011）。取不到就不带，宿主退回旧解析。
+    if (entry.cwd !== '') message.cwd = entry.cwd
     if (change) message.change = change
     postToHost(message)
   }
@@ -288,9 +363,11 @@ window.__ModuleLoader__.load({ id: 'dsh-vscode-file-links', factory: (require) =
     var entry = pending[token]
     if (!entry || entry.extended) return
     entry.extended = true
+    if (entry.trace) entry.trace.result = 'accepted'
     window.clearTimeout(entry.timer)
     entry.timer = window.setTimeout(function () {
       delete pending[token]
+      if (entry.trace) entry.trace.result = 'timeout'
       replayClick(entry.el)
     }, DIFF_WAIT_MS)
   }
@@ -340,6 +417,12 @@ window.__ModuleLoader__.load({ id: 'dsh-vscode-file-links', factory: (require) =
       if (!entry) return
       delete pending[data.token]
       window.clearTimeout(entry.timer)
+      if (entry.trace) {
+        entry.trace.result = data.ok === true ? 'ok' : 'failed'
+        // 宿主附带的失败原因码（no-coord / no-record / no-text / unavailable …）：
+        // 报「只开侧栏」时，这一条就能区分断在客户端还是服务端（规格 011）。
+        if (data.ok !== true && typeof data.reason === 'string') entry.trace.reason = data.reason.slice(0, 32)
+      }
       if (data.ok !== true) replayClick(entry.el)
     }
   }
@@ -364,12 +447,16 @@ window.__ModuleLoader__.load({ id: 'dsh-vscode-file-links', factory: (require) =
     }
     if (ctx && typeof ctx.effect === 'function') ctx.effect(function () { arm(); return disarm })
     else arm()
-    // 供排障使用：控制台可查 __dshVscodeFileLinks.acked() / .diffMode
+    // 供排障使用：控制台可查 __dshVscodeFileLinks.acked() / .diffMode / .log()
+    // log() 给出最近 20 次点击的 {path, cwd, change, result}——报「只开侧栏」时先看这里。
     window.__dshVscodeFileLinks = {
       version: PLUGIN_VERSION,
       hostHint: hostHinted(),
       diffMode: function () { return diffMode },
-      acked: function () { return acked }
+      acked: function () { return acked },
+      cwd: function () { return currentSessionCwd() },
+      log: function () { return trace.slice() },
+      clear: function () { trace = [] }
     }
   }
 

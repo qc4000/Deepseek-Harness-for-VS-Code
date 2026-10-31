@@ -300,11 +300,12 @@ console.log('[9] diff 模式：带轮坐标 + reveal-ack 放宽等待');
   env.runTimers(6000);
   ok(env.reactCalls.length === 1, '6 s 仍无结果才回放（绝不点了没反应）');
 
-  // 没有轮标记：不带坐标（宿主退回 HEAD 对比）
+  // 没有轮标记（历史消息常见）：不再干脆放弃——带 latest，让 DSH 插件找「最后一次改动」（规格 011）
   const plain = env.makeButton({ title: 'src/b.ts' });
   env.dispatchClick(plain);
   reveal = env.posted.filter((m) => m.type === 'reveal');
-  ok(reveal.length === 2 && reveal[1].change === undefined, '无轮标记时不带坐标');
+  ok(reveal.length === 2 && reveal[1].change && reveal[1].change.latest === true, '无轮标记时改带 latest 坐标');
+  ok(reveal[1].change.turn === undefined && reveal[1].change.sessionId === 'session-ab12', 'latest 不带 turn（不猜轮次）');
   env.hostMessage({ source: 'dsh-vscode-host', type: 'reveal-result', token: reveal[1].token, ok: true });
 
   // 拿不到会话 id：同样不带坐标（不能猜错会话）
@@ -351,13 +352,14 @@ console.log('[9] diff 模式：带轮坐标 + reveal-ack 放宽等待');
   ok(revF && revF.change && revF.change.turn === 9, '祖先无标记时取「前一个」标记行的轮');
   ok(revF.change.turn !== 11, '后面的标记行不算（不误取下一轮）');
 
-  // 全文档没有任何标记：仍不带坐标（AC-7 不回退）
+  // 全文档没有任何标记：仍能带 latest（只要拿得到会话）
   const envN = makeEnv({ name: 'dsh-vscode-host', ctx });
   envN.hostMessage({ source: 'dsh-vscode-host', type: 'ack', fileLinks: true, mode: 'diffAndOpen', diff: true });
   const btnN = envN.makeButton({ title: 'src/n.ts' });
   btnN.compareDocumentPosition = () => 2;
   envN.dispatchClick(btnN);
-  ok(envN.posted.filter((m) => m.type === 'reveal')[0].change === undefined, '全无标记时仍不带坐标（AC-7）');
+  const revN = envN.posted.filter((m) => m.type === 'reveal')[0];
+  ok(revN && revN.change && revN.change.latest === true, '全无轮标记时走 latest（AC-4）');
 }
 
 console.log('[10] 布局 ack 不得覆盖文件链接模式（真机回归）');
@@ -387,6 +389,42 @@ console.log('[10] 布局 ack 不得覆盖文件链接模式（真机回归）');
   const btn3 = env3.withTurn(env3.makeButton({ title: 'src/only-layout.ts' }), 2);
   env3.dispatchClick(btn3);
   ok(env3.posted.filter((m) => m.type === 'reveal').length === 0, '仅布局 ack 时不接管点击（保持 DSH 自身行为）');
+}
+
+console.log('[11] 会话 cwd 上报与诊断日志（规格 011）');
+{
+  const ctx = {
+    get: (name) => (name === 'sessions'
+      ? { list: { getSnapshot: () => ({ byId: { 'session-cw': { retainedBy: { mainView: 1 }, cwd: '/w/other' } } }) } }
+      : undefined)
+  };
+  const env = makeEnv({ name: 'dsh-vscode-host', ctx });
+  env.hostMessage({ source: 'dsh-vscode-host', type: 'ack', fileLinks: true, mode: 'diffAndOpen', diff: true });
+  const btn = env.withTurn(env.makeButton({ title: 'src/a.ts' }), 7);
+  env.dispatchClick(btn);
+  const reveal = env.posted.filter((m) => m.type === 'reveal')[0];
+  ok(reveal.cwd === '/w/other', '上报 DSH 会话 cwd（相对链接的基准）');
+  ok(env.win.__dshVscodeFileLinks.cwd() === '/w/other', '排障对象能读到 cwd');
+  const log = env.win.__dshVscodeFileLinks.log();
+  ok(log.length === 1 && log[0].path === 'src/a.ts' && log[0].cwd === '/w/other' && log[0].result === 'pending', '环形日志记下点击（path/cwd/result）');
+  ok(log[0].change && log[0].change.turn === 7, '日志里带坐标（不猜轮次）');
+  env.hostMessage({ source: 'dsh-vscode-host', type: 'reveal-result', token: reveal.token, ok: true });
+  ok(env.win.__dshVscodeFileLinks.log()[0].result === 'ok', '日志记录结果（ok）');
+  env.win.__dshVscodeFileLinks.clear();
+  ok(env.win.__dshVscodeFileLinks.log().length === 0, '日志可清空');
+
+  // 会话取不到 cwd（老版 dsh）：不带 cwd 字段，宿主退回旧解析
+  const noCwdCtx = { sessions: { list: { getSnapshot: () => ({ byId: { 'session-nc': { retainedBy: { mainView: 1 } } } }) } } };
+  const env2 = makeEnv({ name: 'dsh-vscode-host', ctx: noCwdCtx });
+  env2.hostMessage({ source: 'dsh-vscode-host', type: 'ack', fileLinks: true, mode: 'diffAndOpen', diff: true });
+  env2.dispatchClick(env2.withTurn(env2.makeButton({ title: 'src/b.ts' }), 2));
+  const rev2 = env2.posted.filter((m) => m.type === 'reveal')[0];
+  ok(rev2.cwd === undefined, '取不到 cwd 时不带该字段（不传空串）');
+
+  // 失败结果也进日志（用户报「只开侧栏」时能看到宿主回了 failed + 原因码）
+  env2.hostMessage({ source: 'dsh-vscode-host', type: 'reveal-result', token: rev2.token, ok: false, reason: 'no-text' });
+  ok(env2.win.__dshVscodeFileLinks.log()[0].result === 'failed', '宿主回失败时日志记 failed');
+  ok(env2.win.__dshVscodeFileLinks.log()[0].reason === 'no-text', '日志记下失败原因码（断点可定位）');
 }
 
 console.log('\n全部通过：' + passed + ' 项断言 ✓');
