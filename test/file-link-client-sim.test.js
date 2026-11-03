@@ -300,12 +300,13 @@ console.log('[9] diff 模式：带轮坐标 + reveal-ack 放宽等待');
   env.runTimers(6000);
   ok(env.reactCalls.length === 1, '6 s 仍无结果才回放（绝不点了没反应）');
 
-  // 没有轮标记（历史消息常见）：不再干脆放弃——带 latest，让 DSH 插件找「最后一次改动」（规格 011）
+  // 没有轮标记（历史消息常见）：按规格 005 AC-7 / 013 只发 {path}，不带任何轮坐标——
+  // 绝不拿「最新一轮」的变更冒充点击所属轮（真机：点先前轮次却看到最新轮内容）。
   const plain = env.makeButton({ title: 'src/b.ts' });
   env.dispatchClick(plain);
   reveal = env.posted.filter((m) => m.type === 'reveal');
-  ok(reveal.length === 2 && reveal[1].change && reveal[1].change.latest === true, '无轮标记时改带 latest 坐标');
-  ok(reveal[1].change.turn === undefined && reveal[1].change.sessionId === 'session-ab12', 'latest 不带 turn（不猜轮次）');
+  ok(reveal.length === 2 && reveal[1].change === undefined, '无轮标记时不带轮坐标（013：不跨轮展示）');
+  ok(reveal[1].path === 'src/b.ts', '仍上报链接路径（宿主按 005 走 P0/L0）');
   env.hostMessage({ source: 'dsh-vscode-host', type: 'reveal-result', token: reveal[1].token, ok: true });
 
   // 拿不到会话 id：同样不带坐标（不能猜错会话）
@@ -352,14 +353,14 @@ console.log('[9] diff 模式：带轮坐标 + reveal-ack 放宽等待');
   ok(revF && revF.change && revF.change.turn === 9, '祖先无标记时取「前一个」标记行的轮');
   ok(revF.change.turn !== 11, '后面的标记行不算（不误取下一轮）');
 
-  // 全文档没有任何标记：仍能带 latest（只要拿得到会话）
+  // 全文档没有任何标记：同样不带坐标（013 移除 latest 兜底，回到 005 AC-7）
   const envN = makeEnv({ name: 'dsh-vscode-host', ctx });
   envN.hostMessage({ source: 'dsh-vscode-host', type: 'ack', fileLinks: true, mode: 'diffAndOpen', diff: true });
   const btnN = envN.makeButton({ title: 'src/n.ts' });
   btnN.compareDocumentPosition = () => 2;
   envN.dispatchClick(btnN);
   const revN = envN.posted.filter((m) => m.type === 'reveal')[0];
-  ok(revN && revN.change && revN.change.latest === true, '全无轮标记时走 latest（AC-4）');
+  ok(revN && revN.change === undefined, '全无轮标记时不带坐标（013 移除 latest，不展示别的轮）');
 }
 
 console.log('[10] 布局 ack 不得覆盖文件链接模式（真机回归）');

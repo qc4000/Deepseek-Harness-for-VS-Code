@@ -254,23 +254,6 @@ function findCaptured(state, turn, cwd, target) {
   return null
 }
 
-/**
- * 在「已记录」的轮里找这个文件最后一次被改动的那一轮（从大到小扫）。
- * 两个来源都看：`summary()` 的权威清单，以及我们自己捕获的记录（工作区外文件常常
- * 只在后者里）。历史消息没有 `data-chat-turn` 时客户端只能给 sessionId，由这里回答
- * 「本会话最后一次改动」（规格 011）。找不到返回 0。
- */
-function latestTurnOf(service, state, sessionId, target) {
-  const turns = Array.from(state.seqByTurn.keys()).sort((a, b) => b - a)
-  for (const turn of turns) {
-    const summary = service.summary(sessionId, state.seqByTurn.get(turn))
-    const cwd = summary && typeof summary.cwd === 'string' ? summary.cwd : ''
-    if (summary && Array.isArray(summary.files) && fileIndexOf(summary, target) >= 0) return turn
-    if (findCaptured(state, turn, cwd, target)) return turn
-  }
-  return 0
-}
-
 /** 把捕获到的两侧内容按路由协议出口（二进制/超大分别标记）。 */
 function capturedResponse(meta, display, entry) {
   // 清单里有、但我们没有两侧全文（典型：shell 直接改动，没有 intent 钩子）。
@@ -285,8 +268,10 @@ function capturedResponse(meta, display, entry) {
 }
 
 /**
- * 处理一次取数：{sessionId, turn | 'latest', path} → 两侧内容。
+ * 处理一次取数：{sessionId, turn, path} → 两侧内容。
  * 匹配顺序：`summary()` 清单 → 本轮自捕获记录；绝不按请求里的路径直接读盘。
+ * 规格 013：`turn` 只接受点击所属轮的正整数，`turn=latest` 跨轮出口已移除（400）——
+ * 绝不返回「最后一次改动」那种别的轮（往往是最新一轮）的内容。
  */
 async function handle(ctx, sessions, request) {
   let url
@@ -299,11 +284,11 @@ async function handle(ctx, sessions, request) {
   const sessionId = query.get('sessionId') || ''
   const pathParam = query.get('path') || ''
   const turnRaw = query.get('turn') || ''
-  const latest = turnRaw === 'latest'
-  const turn = latest ? 0 : validTurn(turnRaw)
+  const turn = validTurn(turnRaw)
   if (sessionId === '' || sessionId.length > MAX_SESSION_ID) return json(400, { error: 'bad-request' })
   if (pathParam === '' || pathParam.length > MAX_PATH) return json(400, { error: 'bad-request' })
-  if (!latest && (turn === 0 || !/^\d+$/.test(turnRaw))) return json(400, { error: 'bad-request' })
+  // 非正整数（含旧宿主发来的 `latest`）一律 400：没有跨轮出口（规格 013）。
+  if (turn === 0 || !/^\d+$/.test(turnRaw)) return json(400, { error: 'bad-request' })
 
   const state = sessions.get(sessionId)
   // 会话不在内存（已释放 / dsh 重启过）与「会话在但这个轮没有记录」分开报，
@@ -316,16 +301,12 @@ async function handle(ctx, sessions, request) {
   // 收尾未跑完时先等同一份结果：否则会短暂误报 no-text / matched:false。
   if (state.pending) await state.pending.catch(() => {})
 
-  const targetTurn = latest ? latestTurnOf(service, state, sessionId, pathParam) : turn
-  if (latest && targetTurn === 0) return json(200, { matched: false, latest: true })
-
-  const seq = state.seqByTurn.get(targetTurn)
+  const seq = state.seqByTurn.get(turn)
   if (seq === undefined) return json(404, { error: 'no-record' })
-  if (state.open && state.open.turn === targetTurn) await startFinalize(state)
+  if (state.open && state.open.turn === turn) await startFinalize(state)
 
-  // 回包里的轮次永远是「实际用的那一轮」（latest 时可能与客户端预期不同），
-  // 宿主拿它写标题，并在 latest 时提示「这不是你点的那一轮」。
-  const meta = latest ? { turn: targetTurn, latest: true } : { turn: targetTurn }
+  // 回包里的轮次就是点击所属轮：宿主拿它写标题（013 之后不可能是别的轮）。
+  const meta = { turn: turn }
   const summary = service.summary(sessionId, seq)
   const cwd = summary && typeof summary.cwd === 'string' ? summary.cwd : ''
   const listed = summary && Array.isArray(summary.files) ? summary.files : null
@@ -335,11 +316,11 @@ async function handle(ctx, sessions, request) {
       const file = listed[index0]
       const display = typeof file.display === 'string' ? file.display : String(file.path || '')
       const rel = typeof file.path === 'string' ? file.path : ''
-      return capturedResponse(meta, display, pickCapture(state.records.get(targetTurn), cwd, rel))
+      return capturedResponse(meta, display, pickCapture(state.records.get(turn), cwd, rel))
     }
   }
   // 清单里没有（工作区外目标、shell 改动等）→ 用我们自己的捕获记录兜底。
-  const captured = findCaptured(state, targetTurn, cwd, pathParam)
+  const captured = findCaptured(state, turn, cwd, pathParam)
   if (captured) return capturedResponse(meta, captured.display, captured.entry)
   if (!listed) return json(404, { error: 'unavailable' })
   return json(200, { ...meta, matched: false })

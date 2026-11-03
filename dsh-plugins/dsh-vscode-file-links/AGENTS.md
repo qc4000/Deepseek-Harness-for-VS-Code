@@ -34,6 +34,10 @@ DSH 把对话里的工作区路径渲染成 `<button class="_fileLink_xxx">`，�
 5. **协议字段固定**：`source` 用 `dsh-vscode-file-links` / `dsh-vscode-host`；`type` 用
    `hello` / `ack` / `reveal` / `reveal-ack` / `reveal-result`；`mode` 用 `revealAndOpen` /
    `diffAndOpen` / `revealOnly`；`change`（仅 diff 模式）用 `{ sessionId, turn }`。
+   ⚠️ `change` **只有「点击所属轮」这一种语义**（规格 013）：拿不到轮标记就整个不带 `change`
+   （宿主按 005 AC-7 走 P0 → L0），**不得**再引入 `{sessionId, latest:true}` 之类跨轮坐标——
+   它会把「本会话最后一次改动」（往往就是最新一轮）的变更冒充点击所属轮（2026-11-02 真机）；
+   旧插件发来的 `latest` 会被中继直接丢弃、宿主净化处也会拒绝。
    改协议必须同时改 `extension.js`（`buildIframeHtml` 中继脚本 + `handleWebviewMessage`）与宿主测试。
    ⚠️ **`ack` 有两种**：文件链接的（带 `fileLinks`/`mode`/`diff`）与侧栏布局测量的
    （只有 `layout: true`）。宿主在 iframe 加载时先发前者、紧接着发后者；客户端**必须**

@@ -140,7 +140,8 @@ ok(script.includes('event.origin !== FRAME_ORIGIN') && script.includes('event.so
 ok(script.includes("type: 'dsh-reveal-path'") && script.includes("data.type === 'dsh-reveal-result'") && script.includes("type: 'reveal-result'"), 'reveal 请求/回执双向转发');
 ok(script.includes('ackFrame') && script.includes("addEventListener('load'"), 'iframe 加载后重新握手（刷新/重启 dsh web 后仍生效）');
 ok(script.includes('reveal.cwd = data.cwd'), '中继透传 DSH 会话 cwd（规格 011）');
-ok(script.includes('change.latest === true'), '中继接受 latest 坐标（历史消息无轮标记时的兜底）');
+ok(!script.includes('change.latest === true'), '中继不再接受 latest 跨轮坐标（013：不展示别的轮的变更）');
+ok(script.includes('reveal.change = { sessionId: change.sessionId, turn: change.turn }'), '中继仍透传具体轮次坐标（005 AC-1/2 不倒退）');
 ok(script.includes('failed.reason = data.reason'), '中继把失败原因码转回页面（诊断日志可定位）');
 ok(script.includes("data.type === 'dsh-open-link'") && script.includes("data.type === 'insert-selection'"), '既有中继（外链、发送选中内容）未被破坏');
 ok(script.includes('/^https?:\\/\\//i'), '既有外链正则的反斜杠转义仍然正确');

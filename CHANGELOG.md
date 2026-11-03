@@ -2,6 +2,25 @@
 
 本项目遵循 [语义化版本](https://semver.org/lang/zh-CN/)。完整提交历史见 [GitHub](https://github.com/Vithrive/Deepseek-Harness-for-VS-Code/commits/main)。
 
+## 未发布
+
+**文件链接（修复）**
+
+- **点先前轮次的文件链接不再展示最新一轮的变更**：在已有会话里继续提问、再次编辑文件时，
+  点早先消息里的文件链接，打开的却是「本会话最后一次改动」（往往就是最新一轮）的并排 diff、
+  标题也写最新轮次——点的不是这轮，看的也不是这轮。现在轮坐标只认**点击所属轮**一个语义：
+  拿不到轮标记就按规格 005 的三级降级走（与 HEAD 对比 → 普通打开），`latest` 跨轮出口全关
+  （页面插件不发、中继不透传、宿主净化拒绝、DSH 路由 `turn=latest` 返回 400），
+  任何路径都不可能再展示别的轮的内容冒充点击所属轮。
+- 规格：[013-no-cross-turn-diff](docs/sdd/specs/013-no-cross-turn-diff/spec.md)
+  （取代 [011](docs/sdd/specs/011-dsh-cwd-and-latest-turn/spec.md) 的 AC-4/AC-5/AC-7；
+  011 的相对路径按 DSH cwd 解析与诊断日志 `__dshVscodeFileLinks.log()` 不受影响）。
+- 配套插件升级：`dsh-vscode-file-links` 0.2.7 → 0.2.8、`dsh-vscode-changes` 0.2.6 → 0.2.7。
+  装包后请点面板顶部的「重启 dsh web」使其生效。
+- 测试：`file-link-client-sim` 56、`file-link-diff` 141、`workspace-file-link` 94、
+  `dsh-changes-plugin` 63（先红后绿）；`npm test` 21 套 / 1008 项断言、
+  `npm run test:all` 22 套 / 1008 项（含真实 dsh e2e）全绿。
+
 ## 1.0.7
 
 **文件链接（修复）**

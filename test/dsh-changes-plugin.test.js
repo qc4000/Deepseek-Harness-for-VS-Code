@@ -362,10 +362,10 @@ async function call(routes, query) {
   r = await call(built.routes, { sessionId: 's8', turn: '1', path: path.join(cwd, '..', 'outside', 'a.ts') });
   ok(r.status === 200 && r.body.matched === true, '带 .. 的绝对写法（cwd/../outside）也命中');
 
-  // ── [13] turn=latest：按会话最后一次改动出 diff（规格 011）─────
-  // 历史消息没有 `data-chat-turn`，客户端只能给 sessionId；由插件在该会话的
-  // 已记录清单里找「这个文件最后一次被改动」的轮——不猜、不读盘。
-  console.log('[13] turn=latest：老会话仍能定位到最后一次改动');
+  // ── [13] turn=latest 已移除（013）：路由只按具体轮次出数 ─────
+  // 真机 2026-11-02：老会话续问后点先前轮次的链接，`latest` 返回的是「最新一轮」的变更，
+  // 标题与内容都不是点击所属轮——跨轮出口整体移除，回到 005 的降级链。
+  console.log('[13] turn=latest 已移除（不跨轮出数据）');
   built.event(s8, 'turn/start', { turn: 3 }, 112);
   await built.writeIntent(outsideFile, { agent: { session: s8 } });
   fs.writeFileSync(outsideFile, 'v2\n');
@@ -373,17 +373,16 @@ async function call(routes, query) {
   built.event(s8, 'workspace/changes', { turn: 3 }, 121);
   setSummary(built, 121, 3, ['../outside/a.ts']);
   r = await call(built.routes, { sessionId: 's8', turn: 'latest', path: '../outside/a.ts' });
-  ok(r.status === 200 && r.body.matched === true && r.body.latest === true, 'latest 命中并标记 latest');
-  ok(r.body.turn === 3, 'latest 取最新的那一轮（turn=3）');
-  ok(r.body.before.text === 'v1\n' && r.body.after.text === 'v2\n', 'latest 给的是该轮两侧全文');
-  r = await call(built.routes, { sessionId: 's8', turn: 'latest', path: 'src/never.ts' });
-  ok(r.status === 200 && r.body.matched === false && r.body.latest === true, '会话里没改过的文件 → matched:false（不猜）');
+  ok(r.status === 400 && r.body.error === 'bad-request', 'turn=latest → 400（013：跨轮出口移除）');
   r = await call(built.routes, { sessionId: 'no-such-session', turn: 'latest', path: 'a.ts' });
-  ok(r.status === 404 && r.body.error === 'released', '未知会话 → 404 released');
+  ok(r.status === 400, 'latest 先被参数校验拒绝（不泄露会话存在性）');
+  r = await call(built.routes, { sessionId: 's8', turn: '3', path: '../outside/a.ts' });
+  ok(r.status === 200 && r.body.matched === true && r.body.latest === undefined, '具体轮次照常出数（005 AC-1/2 不倒退）');
+  ok(r.body.turn === 3 && r.body.before.text === 'v1\n' && r.body.after.text === 'v2\n', '该轮两侧全文与轮次正确');
   r = await call(built.routes, { sessionId: 's8', turn: '', path: 'a.ts' });
-  ok(r.status === 400, 'turn 缺失且非 latest → 400');
+  ok(r.status === 400, 'turn 缺失 → 400');
   r = await call(built.routes, { sessionId: 's8', turn: 'latest' });
-  ok(r.status === 400, 'latest 仍要求 path（不放开读盘面）');
+  ok(r.status === 400, '缺 path 一律 400（不放开读盘面）');
 
   // ── [14] 清单里没有、但自捕获有 → 仍出 diff（工作区外文件真机主因）────
   // 真机 2026-10-30：session 在项目 A、改的是项目 B 的文件，点击永远 failed。
@@ -403,8 +402,8 @@ async function call(routes, query) {
   r = await call(built.routes, { sessionId: 's9', turn: '2', path: '../far/b.ts' });
   ok(r.status === 200 && r.body.matched === true && r.body.before.text === 'f0\n' && r.body.after.text === 'f1\n', '清单里没有但自捕获有 → 仍给出两侧全文');
   ok(r.body.display === farFile.replace(/\\/g, '/'), 'display 至少能定位到该文件（绝对键）');
-  r = await call(built.routes, { sessionId: 's9', turn: 'latest', path: farFile });
-  ok(r.status === 200 && r.body.matched === true && r.body.turn === 2, 'latest 也能在自捕获记录里找到');
+  r = await call(built.routes, { sessionId: 's9', turn: '2', path: farFile });
+  ok(r.status === 200 && r.body.matched === true && r.body.turn === 2, '自捕获记录用绝对写法按具体轮次也命中');
   r = await call(built.routes, { sessionId: 's9', turn: '2', path: '../far/none.ts' });
   ok(r.status === 200 && r.body.matched === false, '两边都没有 → matched:false（不猜）');
 

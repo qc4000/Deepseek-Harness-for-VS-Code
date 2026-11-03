@@ -219,8 +219,10 @@ webview → 宿主：{ type:'dsh-reveal-path', token, path, change? }
 ```
 
 - `change = {sessionId, turn}` 只在 `mode=diffAndOpen`（`ack.diff=true`）时携带；webview 侧逐字段校验，不合规整条丢弃。
-  历史消息没有 `data-chat-turn` 时客户端改发 `{sessionId, latest:true}`：宿主向轮级路由请求 `turn=latest`，
-  由 `dsh-vscode-changes` 在该会话的已记录清单里找「这个文件最后一次改动」（spec 011），回包带实际 `turn`。
+  **轮坐标只有「点击所属轮」这一种语义**（spec 013）：历史消息没有 `data-chat-turn` 时客户端不带 `change`
+  （spec 005 AC-7，宿主按 P0 → L0 降级）；旧插件发来的 `{sessionId, latest:true}` 在中继处被丢弃、在
+  `sanitizeChangeCoord` 被拒绝，`dsh-vscode-changes` 路由的 `turn=latest` 已移除（400）——
+  任何路径都不可能展示别的轮（spec 011 的跨轮 `latest` 兜底由此取代）。
 - 客户端还随 `path` 上报 DSH 会话 `cwd`（`sessions.list` 的 `cwd`）：相对路径以它为基准解析，
   不再拿 VS Code 文件夹瞎猜（DSH 工作区与文件夹不一致时那样会命中同名的另一个文件）。
 - `reveal-ack` 是「宿主已接单」：页面据此把等待从 2.5s 放宽到 6s，避开「diff 与 DSH 侧栏同时打开」。

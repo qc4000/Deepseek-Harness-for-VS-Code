@@ -2185,11 +2185,11 @@ ${sidebarToolbarHtml}
             && typeof change.sessionId === 'string' && change.sessionId.length > 0 && change.sessionId.length <= 128) {
           var okTurn = typeof change.turn === 'number' && isFinite(change.turn)
             && Math.floor(change.turn) === change.turn && change.turn >= 1 && change.turn <= 1000000;
+          // 只透传「点击所属轮」这一种坐标。旧插件（0.2.7）在 dsh web 未重启时还会发
+          // {latest:true} 跨轮坐标——直接丢弃：宿主把它当无坐标处理（规格 013，
+          // 回 005 AC-7），绝不展示别的轮（尤其最新一轮）的变更冒充点击所属轮。
           if (okTurn) {
             reveal.change = { sessionId: change.sessionId, turn: change.turn };
-          } else if (change.latest === true) {
-            // 历史消息没有轮标记：让宿主去问「这个文件最后一次改动是哪一轮」（规格 011）。
-            reveal.change = { sessionId: change.sessionId, latest: true };
           }
         }
         vscode.postMessage(reveal);
@@ -4121,11 +4121,15 @@ function hasNulByte(value) {
 }
 
 /**
- * 净化插件发来的轮坐标：接受「会话 id + 正整数轮次」，或「会话 id + latest:true」
- * （历史消息没有轮标记时由 DSH 插件自己找最后一次改动）。其余一律丢弃。
+ * 净化插件发来的轮坐标：只接受「会话 id + 正整数轮次」（点击所属轮），其余一律丢弃。
+ *
+ * `{sessionId, latest:true}` 也在这里被拒绝（规格 013）：那是 011 的跨轮兜底坐标，
+ * 会让宿主展示「本会话最后一次改动」（往往是最新一轮）的变更，与点击所属轮对不上
+ * （真机 2026-11-02：老会话续问后点先前轮次的链接，标题与内容都是最新一轮）。
+ * 丢弃后调用方按「无坐标」降级——005 AC-7：不带 change → P0 → L0，不猜、不跨轮。
  * 坐标只用于在已记录清单里查，不参与任何路径拼接。
  * @param {unknown} raw
- * @returns {{sessionId: string, turn: number}|{sessionId: string, latest: true} | null}
+ * @returns {{sessionId: string, turn: number} | null}
  */
 function sanitizeChangeCoord(raw) {
   if (!raw || typeof raw !== 'object') return null;
@@ -4133,7 +4137,6 @@ function sanitizeChangeCoord(raw) {
   const rawSid = typeof raw.sessionId === 'string' ? raw.sessionId : '';
   const sid = rawSid.trim();
   if (sid === '' || sid.length > 128 || /[\u0000-\u001f\u007f]/.test(rawSid)) return null;
-  if (raw.latest === true) return { sessionId: sid, latest: true };
   const turn = Number(raw.turn);
   if (!Number.isSafeInteger(turn) || turn < 1 || turn > 1000000) return null;
   return { sessionId: sid, turn: turn };
@@ -4218,7 +4221,6 @@ function parseTurnChangeResponse(body) {
   return {
     ok: true,
     turn: turn,
-    latest: body.latest === true,
     display: typeof body.display === 'string' ? body.display.slice(0, 512) : '',
     before: before.text,
     after: after.text
@@ -4301,7 +4303,7 @@ async function fetchTurnChange(coord, fsPath) {
     return { ok: false, reason: 'error' };
   }
   const query = '?sessionId=' + encodeURIComponent(coord.sessionId)
-    + '&turn=' + encodeURIComponent(coord.latest === true ? 'latest' : String(coord.turn))
+    + '&turn=' + encodeURIComponent(String(coord.turn))
     + '&path=' + encodeURIComponent(fsPath);
   let body;
   try {
@@ -4394,11 +4396,9 @@ async function openVirtualDiff(before, after, label, title) {
 }
 
 /** 把降级原因变成用户可见的一句话（失败必须写「怎么办」）。 */
-function notifyDiffFallback(reason, latest) {
+function notifyDiffFallback(reason) {
   const messages = {
-    'no-change': latest
-      ? 'DSH：该文件在本会话里没有变更记录，已打开原文件'
-      : 'DSH：本轮没有该文件的变更，已打开原文件',
+    'no-change': 'DSH：本轮没有该文件的变更，已打开原文件',
     'no-record': 'DSH：该轮还没有对比数据（可能尚未结束），已退回与 HEAD 对比',
     released: 'DSH：该轮的对比数据已随会话释放，已退回与 HEAD 对比（可在 DSH 侧栏查看该轮）',
     'no-text': 'DSH：该轮的改动取不到全文（多为 shell 直接改动），已退回与 HEAD 对比',
@@ -4411,17 +4411,6 @@ function notifyDiffFallback(reason, latest) {
   const text = messages[reason] || messages.error;
   const sticky = reason === 'unavailable' || reason === 'released';
   vscode.window.setStatusBarMessage(text, sticky ? 8000 : 6000);
-}
-
-/**
- * 展示的是「本会话最近一次改动」而不是点击所属的轮：必须说清楚（禁止把别的轮冒充这一轮）。
- * @param {number} turn 实际展示的轮次
- * @param {number} [fromTurn] 点击所属轮（有则说明为何回退）
- */
-function notifyLatestHit(turn, fromTurn) {
-  const t = Number(turn) || 0;
-  const head = fromTurn ? '第 ' + Number(fromTurn) + ' 轮没有它的变更，' : '该链接没有轮次信息，';
-  vscode.window.setStatusBarMessage('DSH：' + head + '已展示本会话最近一次改动（第 ' + t + ' 轮）', 6000);
 }
 
 /**
@@ -4445,12 +4434,12 @@ async function openDiffFor(uri, changeRaw, deps) {
     }
     if (result && result.ok === true) {
       const label = result.display || uri.fsPath;
+      // coord 已被 sanitize 限定为「点击所属轮」（latest 被拒，013）：标题里的轮次必是点击的那一轮。
       await openVirtualDiff(result.before, result.after, label, buildDiffTitle(label, 'turn', result.turn));
-      if (result.latest === true) notifyLatestHit(result.turn, coord.turn);
       return true;
     }
     const reason = result && result.reason ? result.reason : 'error';
-    notifyDiffFallback(reason, coord.latest === true);
+    notifyDiffFallback(reason);
     // 二进制/超大：再拿 HEAD 对比同样没意义（内容本身不可读），直接交回调用方普通打开。
     if (reason === 'binary' || reason === 'oversized') return false;
   }
@@ -4468,10 +4457,10 @@ async function openDiffFor(uri, changeRaw, deps) {
 }
 
 /**
- * 取数失败里「换一种写法 / 换 latest 可能命中」的原因码。
- * - `no-change`：该轮/该写法在已记录数据里没有这个文件；
+ * 取数失败里「换一种路径写法可能命中」的原因码（坐标固定为点击所属轮，不再换轮——013）。
+ * - `no-change`：该轮按这种写法在已记录数据里没有这个文件（换种写法可能对上记录键）；
  * - `no-record`：该轮在插件里没有记录（DOM 轮号与事件轮号可能不同源）；
- * - `no-text`：清单里有但本轮没捕获到全文（换一轮可能有）。
+ * - `no-text`：清单里有但本轮没捕获到全文（换种写法可能对上自捕获记录）。
  * 其余（unavailable/released/timeout/error/binary/oversized/invalid）换什么都一样。
  * @param {unknown} reason
  * @returns {boolean}
@@ -4506,9 +4495,11 @@ function absoluteFromCwd(p, dshCwd) {
  * 定位；而 P0（git HEAD ↔ 工作树）必须在该文件所在目录跑 git，等于把读盘扩展到工作区外，
  * 所以这里**不退 P0**，取不到就交回 DSH 自己。
  *
- * 取数尝试链（规格 011）：写法 [原文 → 去行号 → 按 DSH cwd 拼的绝对路径] × 坐标
- * [点击所属轮 → latest]。只有「换一种写法 / 换一轮可能命中」的原因（见
- * `isRetryableChangeReason`）才继续；不可用/超时之类换什么都一样，直接收工。
+ * 取数尝试链（规格 010/011，013 收敛为单坐标）：**只**按点击所属轮查，路径写法
+ * [原文 → 去行号 → 按 DSH cwd 拼的绝对路径] 逐个试；**不换轮**——拿不到所属轮的变更
+ * 就交回 DSH（`latest` 跨轮兜底已移除：绝不展示别的轮、尤其最新一轮的变更冒充点击所属轮）。
+ * 只有「换一种写法可能命中」的原因（见 `isRetryableChangeReason`）才继续；
+ * 不可用/超时之类换什么都一样，直接收工。
  *
  * @param {unknown} rawPath 链接里的原始路径文本
  * @param {unknown} changeRaw 轮坐标（可缺）
@@ -4521,41 +4512,34 @@ async function openOutOfWorkspaceDiff(rawPath, changeRaw, dshCwd) {
     return { ok: false, reason: 'invalid' };
   }
   const coord = sanitizeChangeCoord(changeRaw);
-  // 会话都没有就不猜；只有轮次缺失时还能用 latest 问 DSH「最后一次改动是哪一轮」。
+  // 无坐标（无会话 / 历史消息无轮标记 / 旧插件发来的 latest）：不猜、不跨轮，交回 DSH 侧栏。
   if (!coord) return { ok: false, reason: 'no-coord' };
   const paths = [cleaned];
   const withoutLine = stripLinkLineSuffix(cleaned);
   if (withoutLine !== cleaned && withoutLine !== '') paths.push(withoutLine);
   const abs = absoluteFromCwd(cleaned, dshCwd);
   if (abs !== '' && !paths.includes(abs)) paths.push(abs);
-  const coords = [coord];
-  if (coord.turn) coords.push({ sessionId: coord.sessionId, latest: true });
   const d = diffDeps();
   const fetchChange = typeof d.fetchTurnChange === 'function' ? d.fetchTurnChange : fetchTurnChange;
   let last = { ok: false, reason: 'error', turn: 0 };
-  for (const c of coords) {
-    for (const p of paths) {
-      let result;
-      try {
-        result = await fetchChange(c, p);
-      } catch {
-        result = { ok: false, reason: 'error' };
-      }
-      if (result && result.ok === true) {
-        const label = result.display || p;
-        try {
-          await openVirtualDiff(result.before, result.after, label, buildDiffTitle(label, 'turn', result.turn));
-        } catch {
-          return { ok: false, reason: 'error' };
-        }
-        // 用的不是点击所在轮时，必须说清楚（否则用户会把别的轮当成这一轮）。
-        // 传入的是「点击所属轮」而不是当前尝试的坐标：latest 坐标本身没有 turn。
-        if (result.latest === true) notifyLatestHit(result.turn, coord.turn);
-        return { ok: true };
-      }
-      last = result && typeof result === 'object' ? result : { ok: false, reason: 'error' };
-      if (!isRetryableChangeReason(last.reason)) break;
+  for (const p of paths) {
+    let result;
+    try {
+      result = await fetchChange(coord, p);
+    } catch {
+      result = { ok: false, reason: 'error' };
     }
+    if (result && result.ok === true) {
+      const label = result.display || p;
+      try {
+        await openVirtualDiff(result.before, result.after, label, buildDiffTitle(label, 'turn', result.turn));
+      } catch {
+        return { ok: false, reason: 'error' };
+      }
+      // 坐标固定是点击所属轮：命中即该轮（013 移除 latest 后不可能再展示别的轮）。
+      return { ok: true };
+    }
+    last = result && typeof result === 'object' ? result : { ok: false, reason: 'error' };
     if (!isRetryableChangeReason(last.reason)) break;
   }
   return { ok: false, reason: last.reason || 'error' };

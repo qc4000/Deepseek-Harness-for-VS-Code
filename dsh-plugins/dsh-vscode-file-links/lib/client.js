@@ -12,7 +12,9 @@
 // diff 模式（规格 005）：宿主 ack 里带 `diff: true` 时，点击会额外带「会话 + 轮」
 // 坐标（`change`），宿主据此在 VS Code 里打开该轮的并排 diff；取数超过默认超时时
 // 宿主会先回 `reveal-ack`，本插件据此把等待放宽到 DIFF_WAIT_MS，避免超时回放导致
-// 「diff 与 DSH 侧栏同时打开」。拿不到坐标就不带（宿主会退回 HEAD 对比）。
+// 「diff 与 DSH 侧栏同时打开」。拿不到坐标就不带（宿主会退回 HEAD 对比）——
+// 规格 013：无轮标记时**不再**改发 `{latest:true}` 跨轮坐标，绝不拿别的轮
+// （往往是最新一轮）的变更冒充点击所属轮。
 // 坐标提取有两条退路（2026-10-28 真机排查后加）：会话服务优先属性访问（真机客户端
 // 上下文里 `ctx.get('uiSession')` 不一定解析得到）；轮次在自身祖先没有
 // `data-chat-turn` 时，退而取文档中「前一个」带标记的行。
@@ -27,7 +29,7 @@ window.__ModuleLoader__.load({ id: 'dsh-vscode-file-links', factory: (require) =
   var module = { exports: {} }
   var exports = module.exports
 
-  var PLUGIN_VERSION = '0.2.7'
+  var PLUGIN_VERSION = '0.2.8'
   // 父级 webview（VS Code 扩展）的身份标记：iframe name 属性 + 消息 source 字段。
   var HOST_ID = 'dsh-vscode-host'
   var SELF_ID = 'dsh-vscode-file-links'
@@ -295,18 +297,19 @@ window.__ModuleLoader__.load({ id: 'dsh-vscode-file-links', factory: (require) =
   }
   
   /**
-   * diff 模式下的轮坐标。
-   * - 有会话 + 有轮标记 → `{sessionId, turn}`；
-   * - 有会话但没轮标记（历史消息常见）→ `{sessionId, latest:true}`，由 DSH 插件
-   *   在已记录的清单里找「这个文件最后一次改动」（规格 011）——比直接放弃好得多；
-   * - 会话都没有 → null（不猜）。
+   * diff 模式下的轮坐标：只有「点击所属轮」这一种语义——`{sessionId, turn}`。
+   * 取不到轮次（历史消息没有 `data-chat-turn`，规格 013）就返回 null、只发 `{path}`，
+   * 由宿主按 005 AC-7 走 P0 → L0。**绝不**再发 `{latest:true}`：那会让宿主展示
+   * 「本会话最后一次改动」（往往是最新一轮）的变更，与点击所属轮对不上（真机 2026-11-02）。
+   * @param {HTMLElement} button
+   * @returns {{sessionId: string, turn: number} | null}
    */
   function coordsOf(button) {
     if (!diffMode) return null
     var sessionId = currentSessionId()
     if (sessionId === '') return null
     var turn = turnOf(button)
-    if (turn === 0) return { sessionId: sessionId, latest: true }
+    if (turn === 0) return null
     return { sessionId: sessionId, turn: turn }
   }
   

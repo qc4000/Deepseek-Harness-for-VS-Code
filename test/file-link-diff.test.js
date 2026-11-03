@@ -113,6 +113,10 @@ ok(I.sanitizeChangeCoord({ sessionId: 's', turn: 1000001 }) === null, 'turn 超�
 ok(I.sanitizeChangeCoord({ sessionId: 's'.repeat(129), turn: 1 }) === null, 'sessionId 超长拒绝');
 ok(I.sanitizeChangeCoord({ sessionId: 's\n', turn: 1 }) === null, 'sessionId 含控制字符拒绝');
 ok(I.sanitizeChangeCoord(null) === null && I.sanitizeChangeCoord('x') === null, '非对象输入拒绝');
+// 013：latest 跨轮坐标整体移除——点不到所属轮就不展示任何轮的变更
+ok(I.sanitizeChangeCoord({ sessionId: 's1', latest: true }) === null, 'latest 坐标拒绝（013：不跨轮展示）');
+ok(I.sanitizeChangeCoord({ sessionId: 's1', latest: true, turn: 0 }) === null, 'latest 不再优先于非法 turn');
+ok(I.sanitizeChangeCoord({ sessionId: 's1', latest: true }) === null && good.turn === 7, '具体轮次仍是唯一合法坐标（005 不倒退）');
 
 // 工作目录用平台无关的绝对路径：Windows 下 `/w/proj` 不是绝对路径（path.resolve 会补盘符），
 // 断言不能写死 POSIX 形式。
@@ -246,6 +250,15 @@ async function runCase(change, deps) {
   });
   ok(turnQueried === false, '无坐标时不查询轮级路由（AC-7）');
   ok(!!r.diffCall && r.diffCall[3] === 'extension.js · 与 HEAD 的差异', '无坐标走 P0');
+
+  // latest 坐标（旧插件 0.2.7 在 dsh web 未重启时仍会发）→ 同样按无坐标处理（013 AC-4）
+  turnQueried = false;
+  r = await runCase({ sessionId: 's1', latest: true }, {
+    fetchTurnChange: async () => { turnQueried = true; return { ok: true, turn: 9, latest: true, before: '', after: '' }; },
+    readGitHeadBaseline: async () => ({ kind: 'text', text: 'head\n' })
+  });
+  ok(turnQueried === false, 'latest 坐标不查询轮级路由（013：拒绝跨轮取数）');
+  ok(!!r.diffCall && r.diffCall[3] === 'extension.js · 与 HEAD 的差异', 'latest 坐标走 P0（005 AC-7 降级）');
 
   // P0 也没有 → L0
   r = await runCase(null, {
@@ -449,16 +462,15 @@ async function runCase(change, deps) {
   }
 
   I.setDiffDeps(null);
-  // ── [7] latest 坐标与 cwd 候选（规格 011） ───────────────────
-  console.log('[7] latest 坐标与 cwd 候选（老会话仍能看变更）');
-  ok(I.sanitizeChangeCoord({ sessionId: 's1', latest: true }).latest === true, 'sanitizeChangeCoord 接受 latest（无 turn）');
-  ok(I.sanitizeChangeCoord({ sessionId: 's1', latest: true, turn: 0 }).latest === true, 'latest 优先于非法 turn');
-  ok(I.sanitizeChangeCoord({ sessionId: '', latest: true }) === null, 'latest 也要有 sessionId');
+  // ── [7] latest 跨轮坐标已移除（013）＋ cwd 候选 ───────────────
+  console.log('[7] latest 跨轮坐标已移除（不再展示别的轮）＋ cwd 候选');
+  ok(I.sanitizeChangeCoord({ sessionId: '', latest: true }) === null, '无 sessionId 的 latest 仍拒绝');
   const cwdOutside = process.platform === 'win32' ? 'C:/w/other' : '/w/other';
   ok(I.absoluteFromCwd('src/a.ts', cwdOutside) === cwdOutside + '/src/a.ts', 'absoluteFromCwd 按 DSH cwd 折绝对路径');
   ok(I.absoluteFromCwd(cwdOutside + '/a.ts', cwdOutside) === '', '本来就是绝对路径时不折（返回空串）');
   ok(I.absoluteFromCwd('src/a.ts', '') === '', '没有 cwd 时不折');
 
+  // latest 坐标（旧插件 0.2.7 仍会发）→ 按无坐标处理：零查询、不开任何 diff（013 AC-4）
   let asked = [];
   executed.length = 0;
   statusMessages.length = 0;
@@ -470,27 +482,25 @@ async function runCase(change, deps) {
     readGitHeadBaseline: async () => null
   });
   out = await I.openOutOfWorkspaceDiff(outsideRaw, { sessionId: 's1', latest: true });
-  ok(out.ok === true && asked.length === 1, 'latest 坐标直接查询一次');
-  ok(asked[0].c.latest === true && asked[0].c.turn === undefined, 'latest 请求不带 turn（不猜轮次）');
-  ok(statusMessages.some((t) => t.includes('最近一次改动')), 'latest 命中提示「已展示本会话最近一次改动」');
-  ok(executed.some((c) => c[0] === 'vscode.diff'), 'latest 命中同样开 diff');
+  ok(out.ok === false && out.reason === 'no-coord', 'latest 坐标按无坐标处理（013：不跨轮取数）');
+  ok(asked.length === 0, 'latest 不发起任何轮级查询');
+  ok(executed.length === 0 && !statusMessages.some((t) => t.includes('最近一次改动')), '不开别的轮的 diff、不再提示「最近一次改动」');
 
-  // 指定轮没有该文件 → 自动改用 latest 再查一次
+  // 指定轮没有该文件 → 不换轮重查，交回 DSH 侧栏（013 AC-3）
   asked = [];
   executed.length = 0;
   statusMessages.length = 0;
   I.setDiffDeps({
     fetchTurnChange: async (c, p) => {
       asked.push({ c, p });
-      if (c.latest !== true) return { ok: false, reason: 'no-change' };
-      return { ok: true, turn: 4, latest: true, display: 'a.ts', before: '', after: 'z' };
+      return { ok: false, reason: 'no-change' };
     },
     readGitHeadBaseline: async () => null
   });
   out = await I.openOutOfWorkspaceDiff(outsideRaw, { sessionId: 's1', turn: 3 }, cwdOutside);
-  ok(out.ok === true, '该轮无变更 → 改按 latest 再查一次并命中');
-  ok(asked.some((a) => a.c.latest === true), '确实发出了 latest 请求');
-  ok(statusMessages.some((t) => t.includes('第 3 轮没有它的变更')), '提示说明为何展示的是别的轮');
+  ok(out.ok === false && out.reason === 'no-change', '该轮无变更 → 不再换轮，交回 DSH 侧栏');
+  ok(asked.length > 0 && asked.every((a) => a.c.turn === 3 && a.c.latest !== true), '全程只查点击所属轮（013）');
+  ok(!statusMessages.some((t) => t.includes('最近一次改动')), '不再提示「最近一次改动」');
 
   // 相对路径：把「按 DSH cwd 拼的绝对写法」当候选之一
   asked = [];
@@ -512,7 +522,7 @@ async function runCase(change, deps) {
   out = await I.openOutOfWorkspaceDiff('src/a.ts', { sessionId: 's1', turn: 2 }, cwdOutside);
   ok(out.reason === 'unavailable' && asked.length === 1, '不可用时不再换写法/换坐标重试');
 
-  // no-record / no-text 也要继续换 latest（DOM 轮号与事件轮号可能不同源、本轮可能没捕获）
+  // 可重试原因保留（换一种写法可能命中），但坐标不再换轮（013：只有具体轮次）
   ok(I.isRetryableChangeReason('no-change') === true && I.isRetryableChangeReason('no-record') === true
     && I.isRetryableChangeReason('no-text') === true, '可重试原因：no-change / no-record / no-text');
   ok(I.isRetryableChangeReason('unavailable') === false && I.isRetryableChangeReason('released') === false
@@ -522,13 +532,13 @@ async function runCase(change, deps) {
   I.setDiffDeps({
     fetchTurnChange: async (c, p) => {
       asked.push({ c, p });
-      if (c.latest !== true) return { ok: false, reason: 'no-record' };
-      return { ok: true, turn: 5, latest: true, display: 'a.ts', before: '', after: 'k' };
+      return { ok: false, reason: 'no-record' };
     },
     readGitHeadBaseline: async () => null
   });
   out = await I.openOutOfWorkspaceDiff(outsideRaw, { sessionId: 's1', turn: 9 }, cwdOutside);
-  ok(out.ok === true && asked.some((a) => a.c.latest === true), 'no-record 时也换 latest 再查');
+  ok(out.ok === false && out.reason === 'no-record', 'no-record 不再换 latest（013：交回 DSH 侧栏）');
+  ok(asked.length > 0 && asked.every((a) => a.c.turn === 9 && a.c.latest !== true), 'no-record 也全程只查点击所属轮');
 
   I.setDiffDeps(null);
   // ── [8] 工作区外文件交给 VS Code（opt-in） ───────────────────
