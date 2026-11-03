@@ -1900,6 +1900,9 @@ ${sidebarToolbarHtml}
   var OPEN_PLUGIN_ID = ${jsonForScript(OPEN_EXTERNAL_PLUGIN_SOURCE)};
   var FRAME_ORIGIN = ${jsonForScript(origin)};
   var fileLinkMode = ${jsonForScript(fileLinkMode)};
+  // <a> 新窗口/新标签点击是否转交宿主（dshPanel.externalLinkAction !== off）。
+  // 热更新只改这个变量并重发 ack，不重载 iframe。
+  var externalLinksEnabled = ${jsonForScript(externalLinkAction() !== 'off')};
   // 工作区钉住：独立消息类型（不复用 ack——文件链接插件的 layoutOnly 判别会被
   // 新字段误判，从而丢掉 diff 模式）。
   var WS_PIN_ID = ${jsonForScript(WORKSPACE_PLUGIN_SOURCE)};
@@ -2054,13 +2057,15 @@ ${sidebarToolbarHtml}
   }
 
   /** 握手回执（文件链接 / 外链）：插件据此确认「外层是本 VS Code 面板」。
-   *  fileLinks=false 时文件链接插件保持惰性；openExternal=true 允许转交外链/登录链接。 */
+   *  fileLinks=false 时文件链接插件保持惰性；openExternal=true 允许转交外链/登录链接；
+   *  externalLinks 控制 0.2.0 的 <a> 新窗口/新标签点击桥（off 时为 false）。 */
   function ackFileLinks() {
     var ack = {
       source: HOST_ID,
       type: 'ack',
       fileLinks: fileLinkMode !== 'off',
       openExternal: true,
+      externalLinks: externalLinksEnabled,
       mode: fileLinkMode
     };
     // diff 模式额外告知：点击时会带「会话 + 轮」坐标，插件据此才去取。
@@ -2207,7 +2212,9 @@ ${sidebarToolbarHtml}
       if (data.type === 'open' && typeof data.url === 'string') {
         var link = data.url.trim();
         if (link.length > 0 && link.length <= 8192 && /^https?:\\/\\//i.test(link)) {
-          vscode.postMessage({ type: 'dsh-open-link', url: link });
+          // kind 只认三种；旧插件没有 kind → popup（系统浏览器，兼容 0.1.0）。
+          var kind = data.kind === 'login' ? 'login' : (data.kind === 'link' ? 'link' : 'popup');
+          vscode.postMessage({ type: 'dsh-open-link', url: link, kind: kind });
         }
       }
       return;
@@ -2334,6 +2341,10 @@ ${sidebarToolbarHtml}
       hidden = computeHidden();
       applyLayout();
       if (hidden) scheduleUnavailable();
+    } else if (data.type === 'dsh-external-links-config') {
+      // 外链点击开关热更新：只改标记并重发 ack，不重载 iframe（对话与输入不丢）。
+      externalLinksEnabled = data.enabled === true;
+      ackFileLinks();
     }
   });
   // 初始裁剪（未测量时为 0，等插件上报）；隐藏但拿不到测量时给出提示。
@@ -2392,6 +2403,14 @@ const BUNDLED_PLUGINS_DIR = 'dsh-plugins';
 const VSCODE_HOST_ID = 'dsh-vscode-host';
 const FILE_LINK_PLUGIN_SOURCE = 'dsh-vscode-file-links';
 const OPEN_EXTERNAL_PLUGIN_SOURCE = 'dsh-vscode-open-external';
+// 面板内 `<a>` 新窗口/新标签链接的打开方式：
+// - off：不接管（保持 DSH 行为；window.open 登录/新标签链路不受影响）
+// - systemBrowser：系统默认浏览器（Remote 下由 VS Code 解析到客户端）
+// - vscodeBrowser：VS Code 内置浏览器（Simple Browser / 浏览器视图）
+const EXTERNAL_LINK_ACTION_KEY = 'dshPanel.externalLinkAction';
+const EXTERNAL_LINK_ACTIONS = ['off', 'systemBrowser', 'vscodeBrowser'];
+// 外链长度上限：与页面插件保持一致，宿主再校验一次（页面消息不可全信）。
+const MAX_EXTERNAL_LINK_LENGTH = 8192;
 // 文件链接点击行为：资源管理器定位 + 打开文件 / 定位 + 展示变更 diff / 仅定位 /
 // 不接管（保持 DSH 行为）。
 const FILE_LINK_ACTION_KEY = 'dshPanel.workspaceFileLinkAction';
@@ -2532,6 +2551,9 @@ let workspacePinUnavailableNotified = false;
 let workspacePinFailureNotified = false;
 /** 复制失败的提示是否已弹过（每窗口只提醒一次，避免连续复制刷屏）。 */
 let clipboardFailureNotified = false;
+/** 打开外链失败的提示（每类只提醒一次，避免连续点击刷屏）。 */
+let systemOpenFailureNotified = false;
+let vscodeBrowserFailureNotified = false;
 /** 快捷键转发的提示状态（每类只提醒一次，避免刷屏）。 */
 let keysInvalidNotified = false;
 let releaseKeyInvalidNotified = false;
@@ -3144,6 +3166,147 @@ async function ensureOpenExternalPlugin(profileDir) {
 function fileLinkAction() {
   const raw = String(cfg().get(FILE_LINK_ACTION_KEY, 'revealAndOpen') || '');
   return FILE_LINK_ACTIONS.includes(raw) ? raw : 'revealAndOpen';
+}
+
+/**
+ * 面板内 `<a>` 新窗口/新标签链接的打开方式。
+ *
+ * 只作用于「新窗口/新标签意图」：`target=_blank` / 具名 target / Ctrl(⌘/Shift)+点击 / 中键。
+ * `target=_self`（含没写 target）保持 DSH 当前行为，不在这里接管。
+ * @returns {'off'|'systemBrowser'|'vscodeBrowser'}
+ */
+function externalLinkAction() {
+  const raw = String(cfg().get(EXTERNAL_LINK_ACTION_KEY, 'systemBrowser') || '');
+  return EXTERNAL_LINK_ACTIONS.includes(raw) ? raw : 'systemBrowser';
+}
+
+/**
+ * 解析并净化外部 http(s) 链接。页面消息与 webview 中继都只是「不可全信」的输入，
+ * 宿主再按自己的白名单校验一次：只 http/https、去空白、限长。
+ * @param {unknown} raw
+ * @returns {string|null} 规范化后的 href；非法返回 null
+ */
+function parseHttpUrl(raw) {
+  if (typeof raw !== 'string') return null;
+  const text = raw.trim();
+  if (text.length === 0 || text.length > MAX_EXTERNAL_LINK_LENGTH) return null;
+  try {
+    const url = new URL(text);
+    if (url.protocol !== 'http:' && url.protocol !== 'https:') return null;
+    return url.toString();
+  } catch {
+    return null;
+  }
+}
+
+/** 是否回环地址（用于判断真远程下内置浏览器能否直接打开）。 */
+function isLoopbackUrl(url) {
+  try {
+    const u = new URL(url);
+    return ['127.0.0.1', 'localhost', '::1', '[::1]'].includes(u.hostname);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * 外链打开失败的可见提示（每类只提示一次，避免连续点击刷屏）。
+ * @param {'system'|'vscode'} kind
+ */
+function notifyOpenLinkFailure(kind) {
+  if (kind === 'vscode') {
+    if (vscodeBrowserFailureNotified) return;
+    vscodeBrowserFailureNotified = true;
+    vscode.window.setStatusBarMessage(
+      'VS Code 内置浏览器不可用，已改用系统浏览器打开该链接。',
+      8000
+    );
+    return;
+  }
+  if (systemOpenFailureNotified) return;
+  systemOpenFailureNotified = true;
+  vscode.window.setStatusBarMessage(
+    '系统浏览器未能打开该链接。可在设置 dshPanel.externalLinkAction 中改用 VS Code 内置浏览器。',
+    8000
+  );
+}
+
+/**
+ * 用系统默认浏览器打开外链。Remote 场景由 VS Code 的 openExternal 自动解析到客户端
+ * （文档明确不要自己再调 asExternalUri）。
+ * @param {string} url
+ * @returns {Promise<boolean>}
+ */
+async function openInSystemBrowser(url) {
+  try {
+    const ok = await vscode.env.openExternal(vscode.Uri.parse(url));
+    if (ok === false) {
+      notifyOpenLinkFailure('system');
+      return false;
+    }
+    return true;
+  } catch (e) {
+    console.warn('[DeepSeek Harness] 打开系统浏览器失败：' + ((e && e.message) || e));
+    notifyOpenLinkFailure('system');
+    return false;
+  }
+}
+
+/**
+ * 用 VS Code 内置浏览器打开外链（Simple Browser / 浏览器视图）。
+ *
+ * 真远程下 Simple Browser 跑在客户端，回环地址必须先经 asExternalUri 转发；
+ * 转发失败或命令不可用时回退系统浏览器，并给出可见提示（不静默）。
+ * @param {string} url
+ * @returns {Promise<boolean>}
+ */
+async function openInVSCodeBrowser(url) {
+  let target = url;
+  try {
+    const info = await toClientUrlInfo(url);
+    target = info.url;
+    // 真远程 + 回环：转发失败时客户端打开 127.0.0.1 必然打不开，直接回退系统浏览器。
+    if (!info.forwarded && needsPortForwarding() && isLoopbackUrl(url)) {
+      notifyOpenLinkFailure('vscode');
+      return openInSystemBrowser(url);
+    }
+  } catch {
+    // toClientUrlInfo 内部已兜底；保持原地址继续尝试。
+  }
+  try {
+    await vscode.commands.executeCommand('simpleBrowser.show', target);
+    return true;
+  } catch (e) {
+    console.warn('[DeepSeek Harness] VS Code 内置浏览器打不开链接：' + ((e && e.message) || e));
+    notifyOpenLinkFailure('vscode');
+    return openInSystemBrowser(url);
+  }
+}
+
+/**
+ * 处理页面转交的外链（spec 014）。
+ *
+ * kind 的语义：
+ * - login：登录授权页（about:blank 桩导航），固定系统浏览器；
+ * - popup：直接 window.open（含 DSH linkOpening=new-tab），off 时保持系统浏览器；
+ * - link：`<a>` 新窗口/新标签点击，off 时不打开。
+ * @param {string} rawUrl
+ * @param {'login'|'popup'|'link'} [kind]
+ * @returns {Promise<boolean>} 是否已交给某个浏览器
+ */
+async function routeOpenLink(rawUrl, kind) {
+  const url = parseHttpUrl(rawUrl);
+  if (!url) return false;
+  const normalized = kind === 'login' ? 'login' : (kind === 'link' ? 'link' : 'popup');
+  if (normalized === 'login') return openInSystemBrowser(url);
+
+  const action = externalLinkAction();
+  if (action === 'off') {
+    // off 只关 `<a>` 点击桥；window.open 的既有行为（登录/新标签）保持不变。
+    return normalized === 'popup' ? openInSystemBrowser(url) : false;
+  }
+  if (action === 'vscodeBrowser') return openInVSCodeBrowser(url);
+  return openInSystemBrowser(url);
 }
 
 /**
@@ -4726,18 +4889,20 @@ function notifyClipboardFailure(reason) {
 }
 
 /**
- * 处理 webview 消息：DSH 页面内点击外部链接用系统浏览器打开；点击工作区文件链接在
- * VS Code 资源管理器中定位并打开；发送选中内容回执提示。
- * 侧边栏面板与编辑器标签页共用。
+ * 处理 webview 消息：DSH 页面内点击外部链接时，按 dshPanel.externalLinkAction 用
+ * 系统浏览器 / VS Code 内置浏览器打开；点击工作区文件链接在 VS Code 资源管理器中
+ * 定位并打开；发送选中内容回执提示。侧边栏面板与编辑器标签页共用。
  * @param {any} msg
  * @param {any} [webview] 发起消息的 webview（用于回执；老调用点可省略）
  */
 function handleWebviewMessage(msg, webview) {
   if (msg && msg.type === 'dsh-open-link' && typeof msg.url === 'string') {
-    const u = msg.url;
-    if (/^https?:\/\//i.test(u)) {
-      vscode.env.openExternal(vscode.Uri.parse(u));
-    }
+    // kind 只认三种：login（登录授权页，固定系统浏览器）/ popup（window.open）/
+    // link（<a> 新窗口点击）。缺省按 popup，兼容 0.1.0 插件。
+    const kind = msg.kind === 'login' ? 'login' : (msg.kind === 'link' ? 'link' : 'popup');
+    routeOpenLink(msg.url, kind).catch((e) => {
+      console.warn('[DeepSeek Harness] 打开外链失败：' + ((e && e.message) || e));
+    });
   } else if (msg && msg.type === 'dsh-clipboard-write') {
     // 面板内 DSH 的复制按钮：navigator.clipboard 被 VS Code 权限策略拒绝，
     // 改由宿主写入系统剪贴板（spec 007）。文本只在内存中路过，不记录、不落盘。
@@ -4857,6 +5022,31 @@ function applySidebarPolicyChange() {
 }
 
 /**
+ * 配套插件新增/升级后的统一提示：新的客户端 bundle 要重启 dsh web 才会加载。
+ */
+function notifyDshPluginsChanged() {
+  vscode.window.showInformationMessage('已自动安装/更新 DSH 插件（dsh-drop-caret / dsh-webview-clipboard / dsh-vscode-file-links / dsh-vscode-layout / dsh-vscode-workspace / dsh-vscode-keys / dsh-vscode-open-external），请点击面板顶部的「重启 dsh web」使其生效。');
+}
+
+/**
+ * 外链点击开关热更新（`dshPanel.externalLinkAction`）：只推消息让页面重发 ack，
+ * 不重载 iframe——DSH 对话、滚动位置与输入草稿都不丢。
+ */
+function pushExternalLinksConfig() {
+  const enabled = externalLinkAction() !== 'off';
+  for (const target of [activeView, activeTab]) {
+    if (!target) continue;
+    try {
+      target.webview.postMessage({ type: 'dsh-external-links-config', enabled });
+    } catch { /* 面板已销毁：忽略 */ }
+  }
+  // off → 其它值可能需要在升级后补装/更新插件；装上仍需重启 dsh web 才会加载。
+  ensureDshPlugins().then((changed) => {
+    if (changed && (activeView || activeTab)) notifyDshPluginsChanged();
+  }).catch(() => {});
+}
+
+/**
  * 标签页专用显示地址：本地场景把 host 在 127.0.0.1 与 localhost 之间互换，
  * 制造与侧边栏不同的 origin，避免两个 webview 同 origin 时 DSH 前端的插件加载互斥。
  * 仅当 host 为 127.0.0.1 或 localhost 时互换；其它地址（如远程转发域名）原样返回。
@@ -4903,7 +5093,7 @@ async function preparePanelHtml(isTab) {
   const pluginInstalled = await ensureDshPlugins();
   if (pluginInstalled && (await checkUrl(getUrl()))) {
     // 服务已在运行但插件刚装上，需重启 dsh web 才加载。
-    vscode.window.showInformationMessage('已自动安装/更新 DSH 插件（dsh-drop-caret / dsh-webview-clipboard / dsh-vscode-file-links / dsh-vscode-layout / dsh-vscode-workspace / dsh-vscode-keys），请点击面板顶部的「重启 dsh web」使其生效。');
+    notifyDshPluginsChanged();
   }
 
   const ok = await ensureRunningOnce();
@@ -6551,8 +6741,8 @@ function activate(context) {
 
       render(view);
 
-      // DSH 页面（iframe）内点击外部链接时，由 dsh-open-links 插件通过
-      // postMessage 逐级转发到这里，用系统默认浏览器打开。
+      // DSH 页面（iframe）内的外链/登录链接由 dsh-vscode-open-external 插件通过
+      // postMessage 逐级转发到这里，按 dshPanel.externalLinkAction 打开。
       view.webview.onDidReceiveMessage((m) => handleWebviewMessage(m, view.webview));
 
       const cfgSub = vscode.workspace.onDidChangeConfiguration((e) => {
@@ -6566,6 +6756,9 @@ function activate(context) {
         } else if (e.affectsConfiguration(SIDEBAR_POLICY_KEY)) {
           // 侧栏策略单独处理：只推消息重算，不重载 iframe。
           applySidebarPolicyChange();
+        } else if (e.affectsConfiguration(EXTERNAL_LINK_ACTION_KEY)) {
+          // 外链点击开关：只推消息并重发 ack，不重载 iframe（对话与输入不丢）。
+          pushExternalLinksConfig();
         } else if (e.affectsConfiguration('dshPanel')) {
           render(view);
         } else if (e.affectsConfiguration('editor.fontSize')) {
@@ -6634,6 +6827,9 @@ function activate(context) {
         }
       } else if (e.affectsConfiguration(SIDEBAR_POLICY_KEY)) {
         applySidebarPolicyChange();
+      } else if (e.affectsConfiguration(EXTERNAL_LINK_ACTION_KEY)) {
+        // 外链点击开关：只推消息并重发 ack，不重载 iframe（对话与输入不丢）。
+        pushExternalLinksConfig();
       } else if (e.affectsConfiguration('dshPanel')) {
         reloadTab();
       } else if (e.affectsConfiguration('editor.fontSize')) {
@@ -6926,6 +7122,14 @@ module.exports.__internals = {
   ensureOpenExternalPlugin,
   OPEN_EXTERNAL_PLUGIN_NAME,
   OPEN_EXTERNAL_PLUGIN_SOURCE,
+  EXTERNAL_LINK_ACTION_KEY,
+  EXTERNAL_LINK_ACTIONS,
+  MAX_EXTERNAL_LINK_LENGTH,
+  externalLinkAction,
+  parseHttpUrl,
+  routeOpenLink,
+  openInSystemBrowser,
+  openInVSCodeBrowser,
   buildIframeHtml,
   handleWebviewMessage,
   resolveWorkspaceTarget,

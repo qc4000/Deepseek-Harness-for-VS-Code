@@ -7,7 +7,7 @@
 ## 1. 命令
 
 ```bash
-npm test                      # 语法检查 + 21 套离线单测（1008 项断言）
+npm test                      # 语法检查 + 22 套离线单测（1123 项断言）
 npm run test:one -- file-link # 只跑文件名含 file-link 的套件（TDD 内循环）
 npm run test:verbose          # 逐套件完整输出（看每个 ✓/✗）
 npm run test:all              # 追加真实 dsh e2e（需本机已安装 dsh）
@@ -70,7 +70,8 @@ CI 只认退出码，不看输出格式。
 | `macos-keysim.test.js` | 24 | macOS UA 下逐键行为与 IME/修饰键过滤；Windows 与非 iframe 场景完全不激活 |
 | `remote-mode.test.js` | 34 | 重写（上游）：URL-only 回环判定、`needsPortForwarding` 分类、远程受管认证代理开关与实例重建、转发失败的可读错误 |
 | `remote-auth-proxy.test.js` | 28 | 真远程受管认证代理（上游）：真实 TCP 转发器模拟 VS Code 端口转发；客户端 authority 的 Cookie 换发、远程 403 拦截、扩展侧 `/api` 密钥头、浏览器打开地址转发、面板 CSP 与 `asExternalUri` 失败报错 |
-| `open-external-plugin.test.js` | 43 | 远端登录外链插件（上游）：插件文件/声明完整性、握手前后行为、`about:blank` 占位导航转交、非法 scheme/超长链接回退、webview 中继（ack/open/边界/off 仍可登录）、宿主只放行 http(s) |
+| `open-external-plugin.test.js` | 107 | 远端登录/外链插件：插件文件/声明完整性；0.2.0 click/auxclick 桥（`_blank` 普通左键让 DSH 先处理、DSH `preventDefault` 让位、`stopPropagation` 仍转交、修饰键/中键立即接管、`_self`/同源/download/非 http(s)/超长不碰、macOS Ctrl+click 不抢右键、去重、卸载清理）；`window.open` 登录桩与 `kind=login/popup/link`；webview 中继（ack `externalLinks`、kind 白名单、`dsh-external-links-config` 热更新、off 仍可登录） |
+| `external-link-open.test.js` | 51 | 外链宿主路由（spec 014）：`dshPanel.externalLinkAction` 默认/三值/非法回退；`parseHttpUrl` 只放行 http(s)；`systemBrowser`/`vscodeBrowser`/`off`/login/popup 分支；`simpleBrowser.show` 失败提示一次 + 回退系统浏览器；`openExternal=false` 可见提示；真远程回环 `asExternalUri`；插件 0.2.0 落盘/幂等/不写 dependencies |
 | `desktop-app-support.test.js` | 37 | 官网 Windows 桌面版（上游）：安装目录定位（注册表 InstallLocation / 默认目录）、启动优先级（PATH → 桌面版 CLI → npx）、含空格路径的 cmd.exe 引号、源码级接线；`DESKTOP_CLI_REL` 用 win32 语义，Linux CI 同样可测 |
 | `workspace-file-link.test.js` | 94 | 插件文件齐全/声明/语法；中继脚本语法 + 协议字段；路径解析（相对多工作区、绝对、`../` 越界、不存在、`:12`/`#L12` 行号）；`revealAndOpen`/`revealOnly`/`off`；安装幂等且不写 `dependencies`；`diffAndOpen` 枚举与 `dsh-vscode-changes` 安装（只宿主半边、登记 bundles、幂等、落盘语法通过）；相对路径按 DSH `cwd` 解析（011，cwd 指向别处时不命中 VS Code 同名文件）、cwd 为空/非法退回旧解析；中继透传 `cwd`、只透传具体轮次（`latest` 被丢弃，013） |
 | `workspace-pin.test.js` | 73 | 工作区跟随（006）：插件包声明（`dsh.client.platform=web`、bundle patch、无依赖）与「不碰 DOM/localStorage」静态约束；`workspacePinPath`/`workspacePinEnabled`/路径形状（空窗口、开关、URL、控制字符、超长）；中继脚本独立消息 `workspace-pin`（origin/source 双校验、8s 超时上报、结果状态白名单与 reason 截断、特殊字符路径不破坏脚本）；客户端仿真（未握手惰性、`create`+`openWorkspace` 各一次、已就位不动作、服务缺失上报 unsupported、失败上报 failed、未就绪轮询、重复下发幂等、非父级消息不认）；`ensureWorkspacePlugin` 落盘/登记/幂等 |

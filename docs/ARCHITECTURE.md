@@ -200,6 +200,7 @@ profile 目录：`$DSH_HOME`（默认 `~/.dsh`）`/profiles/web`；插件写入
 | `dsh-vscode-changes` | `dsh-plugins/` 真实文件随扩展分发（**仅宿主半边**） | 见插件 `package.json` | 把「某会话某轮里某文件的两侧全文」出口成一条鉴权 GET 路由（`/api/dsh-vscode.changes-file`），供轮级 diff；仅 `workspaceFileLinkAction=diffAndOpen` 时安装 |
 | `dsh-vscode-workspace` | `dsh-plugins/` 真实文件随扩展分发（客户端半边干活，宿主半边 no-op） | 见插件 `package.json` | 面板加载后把 DSH 当前工作区切到 VS Code 文件夹：`ctx.workspaces.create({path})` + `ctx.uiWorkspace.openWorkspace(id)`；`dshPanel.pinWorkspaceToVSCode=false` 时不安装 |
 | `dsh-vscode-keys` | `dsh-plugins/` 真实文件随扩展分发（客户端半边干活，宿主半边 no-op） | 见插件 `package.json` | 面板内按下的工作台级快捷键转发给宿主 `executeCommand`；每次按键前读 DSH 自己的键位目录（`ctx.shortcuts.catalog` / `fixedCatalog`）做签名比对，**命中即让位**；同时承担 `dshPanel.focusInput` 的 `focus-input` 链路（`conversation.input.for(ctx).focus()` → composer DOM 回退）；`dshPanel.forwardVSCodeKeys` 与 `dshPanel.focusInputEnabled` 均关时才不安装 |
+| `dsh-vscode-open-external` | `dsh-plugins/` 真实文件随扩展分发（客户端半边干活，宿主半边 no-op） | 见插件 `package.json` | 面板内 `window.open`（登录授权页）与 `<a target=_blank>` / 修饰键 / 中键点击转交宿主；`kind=login` 固定系统浏览器，`popup/link` 按 `dshPanel.externalLinkAction` 走系统浏览器或 `simpleBrowser.show`；`target=_self` 不碰 |
 
 两个与 diff 相关的插件用到的 DSH 字段（均为实测，非公开契约，结构不符即 404）：
 
@@ -226,6 +227,24 @@ webview → 宿主：{ type:'dsh-reveal-path', token, path, change? }
 - 客户端还随 `path` 上报 DSH 会话 `cwd`（`sessions.list` 的 `cwd`）：相对路径以它为基准解析，
   不再拿 VS Code 文件夹瞎猜（DSH 工作区与文件夹不一致时那样会命中同名的另一个文件）。
 - `reveal-ack` 是「宿主已接单」：页面据此把等待从 2.5s 放宽到 6s，避开「diff 与 DSH 侧栏同时打开」。
+
+**外链 / 登录消息协议**（spec 014；与 `ack` 共用，但字段只增不改）：
+
+```
+插件 → webview：{ source:'dsh-vscode-open-external', type:'hello' }
+webview → 插件：{ source:'dsh-vscode-host', type:'ack', openExternal:true, externalLinks:boolean, fileLinks, mode, diff }
+插件 → webview：{ source:'dsh-vscode-open-external', type:'open', url, kind:'login'|'popup'|'link' }
+webview → 宿主：{ type:'dsh-open-link', url, kind }
+宿主 → webview：{ type:'dsh-external-links-config', enabled:boolean }   // 热更新，不重载 iframe
+```
+
+- `kind`：`login` = `about:blank` 登录桩导航，固定系统浏览器；`popup` = 直接 `window.open`
+  （含 DSH `linkOpening=new-tab`），off 时仍走系统浏览器；`link` = `<a>` 新窗口/新标签点击，
+  off 时不打开。旧插件没有 `kind` → 按 `popup` 处理。
+- `externalLinks`：`dshPanel.externalLinkAction !== 'off'`；旧宿主没有该字段 → 插件按 false，
+  点击桥保持惰性（不改变既有行为）。
+- 页面侧只转交 http(s)、非同源、非 download、≤8192 的链接；`target=_self` 与无 target 不碰。
+- 宿主侧 `routeOpenLink` 再做一次 `parseHttpUrl` 净化；`vscodeBrowser` 失败回退系统浏览器并提示。
 
 **工作区钉住消息协议**（独立类型，不复用 `ack`）：
 

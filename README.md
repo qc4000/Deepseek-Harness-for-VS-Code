@@ -41,7 +41,7 @@
 - **工作区自动对接**：以 VS Code 当前工作区启动 dsh 并注册到 DSH 工作区列表（幂等，不覆盖你在 DSH 里的手动选择）；
 - **远程支持**：Remote-SSH / Dev Containers 下运行于服务器端，自动检测安装服务器端 dsh、经端口转发把面板接入本地 VS Code；
 - 面板按钮：刷新（不打断运行中的任务）/ 重启 dsh web / 在浏览器中打开；字号跟随 `editor.fontSize` 等比缩放（CSS zoom 实现，非整数倍缩放同样清晰）；
-- **发送选中内容 / 拖放文件到 DSH 对话框**（自动安装配套插件 `dsh-drop-caret`）：把文件、文件夹、代码段以 `路径:行号` 引用精确插入对话框光标处——**从 VS Code 资源管理器拖拽直接引用源文件本身**（不产生副本）；从系统文件管理器拖入时浏览器无法取得真实路径，此时才回退为工作区 `.dsh-drop/` 下的内容快照。点击 DSH 对话中的外链在系统浏览器打开（配合 DSH 插件 `dsh-open-links`）。
+- **发送选中内容 / 拖放文件到 DSH 对话框**（自动安装配套插件 `dsh-drop-caret`）：把文件、文件夹、代码段以 `路径:行号` 引用精确插入对话框光标处——**从 VS Code 资源管理器拖拽直接引用源文件本身**（不产生副本）；从系统文件管理器拖入时浏览器无法取得真实路径，此时才回退为工作区 `.dsh-drop/` 下的内容快照。点击 DSH 对话中的外链按 `dshPanel.externalLinkAction` 打开（自动安装配套插件 `dsh-vscode-open-external`）。
 - **面板内剪贴板修复（自动安装配套插件 `dsh-webview-clipboard`；v1.0.6 起覆盖复制按钮）**：
   - **复制按钮（全平台）**：DSH 代码块 / 消息上的「复制」走 `navigator.clipboard.writeText`，而 VS Code 的权限策略会拒绝 webview 内层跨源 iframe（[microsoft/vscode#182642](https://github.com/microsoft/vscode/issues/182642)），按钮直接失败且 DSH 不会回退。插件改为「原生 → 宿主 `vscode.env.clipboard` → `execCommand`」三级回退；仅面板内嵌时接管，系统浏览器直接打开 DSH 行为不变。
   - **macOS 快捷键**：⌘C/⌘V/⌘X 在跨源 iframe 内嵌时原生默认动作不会发生，插件拦截三键并经 `execCommand` 显式执行；仅 macOS + 被内嵌时启用。
@@ -49,7 +49,7 @@
 - **隐藏 DSH 左侧栏（v1.0.1 起）**：面板顶部工具条上的按钮可在「隐藏 / 显示 DSH 左侧栏」之间切换，窄面板（<1024px，如侧边栏、底部面板）默认隐藏，让对话区占满宽度；隐藏只靠父容器视口裁剪实现，**不往 DSH 页面里注入任何东西**。详见下文专节。
 - **官网 Windows 桌面版启动**：自动从注册表 / 常见默认目录定位桌面版内置 CLI，按 `dshPanel.dshCommand` → 桌面版 CLI → `npx` 的顺序启动，不需要 PATH / npm / Node；桌面版起的实例仍是 web profile，会话与凭据共享（同一个 `~/.dsh`）。
 - **Remote-SSH / Dev Containers 受管认证代理**：真远程下按「`dshPanel.url` 是否回环」判定代理可用，面板经 `asExternalUri` 转发加载；远程模式只放行已转发 authority 的请求，扩展自身请求带一次性密钥头。新增 `dshPanel.remoteAuthProxy`（默认 `true`），多用户共享服务器建议关闭。
-- **远端面板用本机浏览器登录 DeepSeek 账号（自动安装配套插件 `dsh-vscode-open-external`）**：接管 DSH 页面的 `window.open`，把授权链接交给 `vscode.env.openExternal` 在客户端（WSL/Remote 下即本机）浏览器打开；只转交 http(s) 链接，仅握手后接管，独立浏览器行为不变。新增 `dshPanel.installOpenExternalPlugin`（默认 `true`）可关闭。
+- **面板内外链改用系统浏览器或 VS Code 内置浏览器（自动安装配套插件 `dsh-vscode-open-external`，0.2.0 起）**：VS Code webview 的 sandbox 没有 `allow-popups`，DSH 页面里的 `<a target="_blank">`、Ctrl/Cmd/Shift+点击、中键以前「点了没反应」。插件在页面内只识别**新窗口/新标签意图**，经 webview 中继交给宿主，按 `dshPanel.externalLinkAction` 用系统浏览器或 VS Code 内置浏览器（Simple Browser / 浏览器视图）打开；DSH 自己接管的点击（聊天「在侧栏打开」）不受影响，登录授权页固定系统浏览器。`dshPanel.installOpenExternalPlugin`（默认 `true`）可整体关闭安装；只想关 `<a>` 点击桥请用 `dshPanel.externalLinkAction=off`。
 
 ### 使用示例：发送选中内容到对话框
 
@@ -80,7 +80,8 @@
 | `dshPanel.killOnDispose` | `true` | 扩展停用时是否结束它启动的 dsh |
 | `dshPanel.openSystemBrowser` | `false` | 扩展启动 dsh 时是否保留弹系统浏览器的旧行为 |
 | `dshPanel.installClipboardPlugin` | `true` | 自动安装内置 `dsh-webview-clipboard` 插件（面板内复制按钮走宿主剪贴板；macOS 额外修复 ⌘C/⌘V/⌘X）。怀疑影响 dsh web 启动时可关闭对比；关闭后复制按钮恢复 DSH 原生行为 |
-| `dshPanel.installOpenExternalPlugin` | `true` | 自动安装内置 `dsh-vscode-open-external` 插件：面板内 `window.open`（典型：DeepSeek 账号登录授权页）改在本机系统浏览器打开，Remote-WSL / Remote-SSH 下由你的 Windows 浏览器打开 |
+| `dshPanel.installOpenExternalPlugin` | `true` | 自动安装内置 `dsh-vscode-open-external` 插件（外链/登录桥）：面板内 `window.open`（典型：DeepSeek 账号登录授权页）与 `<a>` 新窗口/新标签点击交给宿主。关闭后插件不安装/不更新；只想关 `<a>` 点击桥请用 `dshPanel.externalLinkAction=off` |
+| `dshPanel.externalLinkAction` | `systemBrowser` | 面板内 `<a target="_blank">` / Ctrl/Cmd/Shift+点击 / 中键外链的打开方式：`systemBrowser` 系统默认浏览器（Remote-WSL / Remote-SSH 下由客户端打开）/ `vscodeBrowser` VS Code 内置浏览器（Simple Browser / 浏览器视图）/ `off` 不接管（保持 DSH 当前行为；`window.open` 登录/新标签链路不变）。DSH 自己接管的点击（聊天「在侧栏打开」）与 `target="_self"` 不受影响；修改即时生效，不重载面板 |
 | `dshPanel.remoteAuthProxy` | `true` | Remote-SSH / Dev Containers 等真远程窗口下是否启用受管认证代理（默认启用）；代理只监听服务器回环，多用户共享服务器建议关闭，关闭后面板会给出浏览器认证引导 |
 | `dshPanel.workspaceFileLinkAction` | `revealAndOpen` | 对话里工作区文件/文件夹链接的点击行为：`revealAndOpen` 资源管理器定位并打开 / `diffAndOpen` 定位 + 展示变更（并排 diff，工作区外的文件也能看该轮变更，见下节）/ `revealOnly` 仅定位 / `off` 不接管（保持 DSH 侧边栏打开，也不安装配套插件） |
 | `dshPanel.outOfWorkspaceFileAccess` | `false` | 是否把**工作区外**文件也交给 VS Code。默认 `false`（工作区外链接取不到轮级记录时保持 DSH 侧栏打开）。DSH 的轮级变更记录只在进程内存，**重启 dsh web 后旧轮次就没有数据**；开启后按「轮级 → 与 git `HEAD` 的差异 → 直接打开」降级，等价于把模型给的任意路径交给编辑器，请自行权衡 |
@@ -89,6 +90,28 @@
 | `dshPanel.forwardKeybindings` | `{}` | 在默认转发表之上增删按键：值写命令 id 表示转发（也可覆盖默认），写 `false` 表示永不拦截。不支持两段式（`ctrl+k ctrl+s`）；无修饰键的单键不会被拦截（会破坏输入框） |
 | `dshPanel.focusReleaseKey` | `F6` | 把焦点交还 VS Code 的按键。按下后可使用任意自定义键位与两段式快捷键，办完事按 `Ctrl+Shift+J`（macOS `⇧⌘J`）直接跳回输入框；置空字符串可关闭（不影响快捷键转发） |
 | `dshPanel.focusInputEnabled` | `true` | 是否为「聚焦 DSH 输入框」提供默认键位 `Ctrl+Shift+J`（macOS `⇧⌘J`）。关闭后该组合彻底不生效（不占用你的按键），命令本身仍可在命令面板调用；换组合请在「键盘快捷方式」里搜 `dshPanel.focusInput` |
+
+### 面板内外部链接怎么打开（下一版起）
+
+DSH 被以跨源 iframe 嵌进 VS Code webview 时，webview 的 sandbox 不允许弹窗：`window.open`、
+`<a target="_blank">`、Ctrl/Cmd/Shift+点击、中键都可能「点了没反应」。内置插件
+`dsh-vscode-open-external` 0.2.0 起补齐这一层：
+
+| 点击 | 行为 |
+| --- | --- |
+| 聊天里 DSH 自己接管的普通左键（「在侧栏打开」） | 保持 DSH 行为，不抢 |
+| `<a target="_blank">`（设置页、插件市场、工具结果等） | 按 `dshPanel.externalLinkAction` |
+| Ctrl/Cmd/Shift + 左键、中键（链接本身须是新窗口目标，如 `_blank`） | 按 `dshPanel.externalLinkAction` |
+| 登录 DeepSeek 账号的授权页 | 固定系统浏览器 |
+| `target="_self"` / 同源 / `#hash` / download / 非 http(s) | 保持原行为，不接管 |
+
+- `systemBrowser`（默认）：系统默认浏览器；Remote-SSH / WSL 下由客户端浏览器打开。
+- `vscodeBrowser`：VS Code 内置浏览器（Simple Browser / 浏览器视图）新标签页；命令不可用时状态栏
+  提示一次并回退系统浏览器。
+- `off`：不接管 `<a>` 点击，保持现状；`window.open` 的登录/新标签链路不变。
+
+设置修改即时生效，不重载 iframe（对话与输入不丢）。若刚更新扩展，需要点面板顶部
+「重启 dsh web」让新的页面插件生效。
 
 ### 面板内快捷键转发（v1.0.6 起）
 

@@ -4,6 +4,28 @@
 
 ## 未发布
 
+**外部链接（新增）**
+
+- **面板里「点了没反应」的外链，现在能按设置用系统浏览器或 VS Code 内置浏览器打开**：
+  VS Code webview 的 sandbox 没有 `allow-popups`，DSH 页面里的 `<a target="_blank">`、中键、
+  Ctrl/Cmd/Shift+点击都不经过 `window.open`，默认动作被静默拦掉。内置插件
+  `dsh-vscode-open-external` 0.1.0 → 0.2.0 在页面内补了一层 click/auxclick 桥：只识别
+  **新窗口/新标签意图**，经 webview 中继交给宿主；DSH 自己 `preventDefault()` 的点击
+  （聊天「在侧栏打开」）仍然让位，`target="_self"` / 同源 / `#hash` / download / 非 http(s)
+  一律不碰。登录 `about:blank` 授权页仍固定走系统浏览器。
+- 新增设置 `dshPanel.externalLinkAction`（默认 `systemBrowser`）：
+  `systemBrowser` 系统默认浏览器（Remote-SSH / WSL 下由客户端打开）/
+  `vscodeBrowser` VS Code 内置浏览器（`simpleBrowser.show`，命令不可用时状态栏提示并回退系统浏览器）/
+  `off` 只关 `<a>` 点击桥（`window.open` 登录/新标签链路不变）。
+  修改设置即时生效，不重载 iframe；`dshPanel.installOpenExternalPlugin=false` 仍是安装级总开关。
+- 兼容：旧插件缺 `externalLinks` → 点击桥不启用；新插件发 `kind=login/popup/link`，
+  旧宿主忽略后仍按系统浏览器处理；独立浏览器打开 DSH 时插件完全不介入。
+- 配套插件升级：`dsh-vscode-open-external` 0.1.0 → 0.2.0。装包后请点面板顶部的
+  「重启 dsh web」使其生效。
+- 规格：[014-external-link-open](docs/sdd/specs/014-external-link-open/spec.md)；
+  测试：`open-external-plugin` 43 → 107、新增 `external-link-open` 51；
+  `npm test` 22 套 / 1123 项断言全绿。
+
 **文件链接（修复）**
 
 - **点先前轮次的文件链接不再展示最新一轮的变更**：在已有会话里继续提问、再次编辑文件时，

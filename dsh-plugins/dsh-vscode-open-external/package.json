@@ -1,7 +1,7 @@
 {
   "name": "dsh-vscode-open-external",
-  "version": "0.1.0",
-  "description": "DeepSeek Harness 插件：DSH 页面被外层宿主（VS Code 扩展 webview）内嵌时，把页面里的 window.open（如 DeepSeek 账号登录的授权链接）转交给宿主，用系统默认浏览器打开。由 Deepseek-Harness-for-VS-Code 扩展内置分发。",
+  "version": "0.2.0",
+  "description": "DeepSeek Harness 插件：DSH 页面被外层宿主（VS Code 扩展 webview）内嵌时，把页面里的 window.open、<a target=_blank>、修饰键/中键点击转交给宿主，按设置用系统默认浏览器或 VS Code 内置浏览器打开。由 Deepseek-Harness-for-VS-Code 扩展内置分发。",
   "keywords": [
     "deepseek",
     "harness",

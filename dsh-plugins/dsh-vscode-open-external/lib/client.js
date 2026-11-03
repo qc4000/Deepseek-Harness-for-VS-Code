@@ -6,34 +6,53 @@
 // BrowserLogin：先 window.open('about:blank') 预开页，拿到授权链接后再 replace 过去），
 // 于是登录流程会卡在「没有自动打开新页面？」。
 //
-// 链路：本插件接管 window.open → 授权链接经 window.parent.postMessage 交给 webview
-//       中继 → 扩展宿主 vscode.env.openExternal → **客户端**（WSL/Remote 场景即
-//       Windows 本机）的默认浏览器打开授权页；登录回调地址是 DSH 所在机器的回环
-//       地址，Windows 经 WSL localhost 转发可达，登录完成后面板自动刷新为已登录。
+// 0.2.0 起还补上 `<a target="_blank">` / 修饰键 / 中键这一层：它们不经过 window.open，
+// 而 webview 的 sandbox 没有 allow-popups，默认动作会被静默拦掉（表现为「点了没反应」）。
+// 插件在 capture 阶段只识别「新窗口 / 新标签」意图，把链接交给 webview 中继，再由宿主
+// 按 `dshPanel.externalLinkAction` 选择系统浏览器或 VS Code 内置浏览器。
 //
-// 三条底线：
+// 链路：本插件接管 window.open + click/auxclick → 授权/外链经 window.parent.postMessage
+//       交给 webview 中继 → 扩展宿主按设置 openExternal / simpleBrowser.show。
+//
+// 四条底线：
 // 1. 只在宿主完成握手（ack）后接管；独立浏览器 / 其它宿主里完全不介入；
 // 2. 只转交 http/https 链接（超长、非法 scheme 一律回退原生行为）；
 // 3. about:blank 预开页返回一个可导航的桩对象，把后续 location.replace/assign/href
-//    的跳转目标转交宿主——与 DSH 官方 BrowserLogin 的用法一一对应。
+//    的跳转目标转交宿主——与 DSH 官方 BrowserLogin 的用法一一对应；
+// 4. click 桥只补 DSH 没接管的点击：DSH 已 preventDefault 的普通左键仍走 DSH 侧栏；
+//    `target="_self"`（含没写 target）不碰，保持 DSH 当前行为。
 
 window.__ModuleLoader__.load({ id: 'dsh-vscode-open-external', factory: (require) => {
   var module = { exports: {} }
   var exports = module.exports
 
-  var PLUGIN_VERSION = '0.1.0'
+  var PLUGIN_VERSION = '0.2.0'
   var HOST_ID = 'dsh-vscode-host'
   var SELF_ID = 'dsh-vscode-open-external'
   var HELLO_INTERVAL_MS = 400
   var HELLO_MAX_TRIES = 25
   var URL_MAX_LENGTH = 8192
+  // window.open 与 click 可能对同一次用户操作各发一条：短时间去重，避免开两个窗口。
+  var DEDUPE_MS = 600
   var pendingPopup = null
 
   var acked = false
+  var linksEnabled = false
+  var clickInstalled = false
   var helloTimer = null
   var helloTries = 0
   var originalOpen = null
   var patched = false
+  var lastHandOffUrl = ''
+  var lastHandOffAt = 0
+
+  // macOS 的 Ctrl+click 是右键菜单；只有 ⌘/Shift 才是「新标签/新窗口」。
+  var macPlatform = (function () {
+    try {
+      var ua = window.navigator && window.navigator.userAgent ? window.navigator.userAgent : ''
+      return /Mac|iPhone|iPad|iPod/i.test(ua)
+    } catch (e) { return false }
+  })()
 
   /** 是否被宿主内嵌（独立浏览器里 parent === self）。 */
   function inIframe() {
@@ -68,13 +87,27 @@ window.__ModuleLoader__.load({ id: 'dsh-vscode-open-external', factory: (require
     }, HELLO_INTERVAL_MS)
   }
 
-  /** 把链接交给宿主（系统浏览器）。非 http/https 或超长链接返回 false。 */
-  function handOff(url) {
+  /**
+   * 把链接交给宿主。非 http/https、超长、非法 URL 返回 false（调用方回退原生行为）。
+   * @param {string} url
+   * @param {'login'|'popup'|'link'} kind
+   * @returns {boolean}
+   */
+  function handOff(url, kind) {
     if (typeof url !== 'string') return false
     var u = url.trim()
     if (u.length === 0 || u.length > URL_MAX_LENGTH) return false
-    if (!/^https?:\/\//i.test(u)) return false
-    postToHost({ type: 'open', url: u })
+    try {
+      var parsed = new URL(u)
+      if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return false
+      u = parsed.href
+    } catch (e) { return false }
+    var now = Date.now()
+    if (u === lastHandOffUrl && now - lastHandOffAt < DEDUPE_MS) return true
+    lastHandOffUrl = u
+    lastHandOffAt = now
+    var normalized = kind === 'login' ? 'login' : (kind === 'link' ? 'link' : 'popup')
+    postToHost({ type: 'open', url: u, kind: normalized })
     return true
   }
 
@@ -93,7 +126,8 @@ window.__ModuleLoader__.load({ id: 'dsh-vscode-open-external', factory: (require
       close: function () { stub.closed = true }
     }
     function navigate(target) {
-      if (handOff(target)) pendingPopup = null
+      // 登录授权页固定交系统浏览器：内置浏览器里的 OAuth 回调不可靠。
+      if (handOff(target, 'login')) pendingPopup = null
     }
     stub.location = {
       replace: navigate,
@@ -119,7 +153,9 @@ window.__ModuleLoader__.load({ id: 'dsh-vscode-open-external', factory: (require
         if (isAboutBlank(raw)) {
           return makePopupStub()
         }
-        if (handOff(raw)) return null
+        // 直接 window.open（如 DSH 的 linkOpening=new-tab）按 popup 处理：
+        // off 时仍走系统浏览器，保持 0.1.0 的既有行为。
+        if (handOff(raw, 'popup')) return null
       }
     } catch (e) { /* 任何异常都回退原生行为 */ }
     return originalOpen.apply(window, arguments)
@@ -144,6 +180,133 @@ window.__ModuleLoader__.load({ id: 'dsh-vscode-open-external', factory: (require
     pendingPopup = null
   }
 
+  /** 从事件路径里找最近的 <a href>（兼容 shadow DOM）。 */
+  function findAnchor(event) {
+    var path = typeof event.composedPath === 'function' ? event.composedPath() : null
+    if (path) {
+      for (var i = 0; i < path.length; i += 1) {
+        var item = path[i]
+        if (item && item.nodeType === 1 && item.tagName === 'A' &&
+            typeof item.hasAttribute === 'function' && item.hasAttribute('href')) return item
+      }
+    }
+    var node = event.target
+    while (node) {
+      if (node.nodeType === 1 && node.tagName === 'A' &&
+          typeof node.hasAttribute === 'function' && node.hasAttribute('href')) return node
+      node = node.parentNode
+    }
+    return null
+  }
+
+  /**
+   * 解析 <a> 的外部目标：只认 http(s)、非同源、非 download、非 #hash、长度受限。
+   * 返回 null 表示「保持 DSH 原行为」。
+   * @param {Element} anchor
+   * @returns {string|null}
+   */
+  function externalHref(anchor) {
+    if (typeof anchor.hasAttribute === 'function' && anchor.hasAttribute('download')) return null
+    var raw = typeof anchor.getAttribute === 'function' ? anchor.getAttribute('href') : ''
+    if (typeof raw !== 'string' || raw.length === 0 || raw.length > URL_MAX_LENGTH) return null
+    try {
+      var u = new URL(raw, window.location.href)
+      if (u.protocol !== 'http:' && u.protocol !== 'https:') return null
+      // 同源（含相对路径、#hash）是 DSH 自己的内部导航，不能碰。
+      if (u.origin === window.location.origin) return null
+      return u.href
+    } catch (e) { return null }
+  }
+
+  function targetOf(anchor) {
+    var target = typeof anchor.getAttribute === 'function' ? anchor.getAttribute('target') : ''
+    return typeof target === 'string' ? target.trim().toLowerCase() : ''
+  }
+
+  /** 立即接管：阻断默认动作，再交给宿主。 */
+  function takeOver(event, url) {
+    try { event.preventDefault() } catch (e) { /* 合成事件可能没有 */ }
+    try { event.stopPropagation() } catch (e) { /* 同上 */ }
+    handOff(url, 'link')
+  }
+
+  /**
+   * target=_blank 的普通左键先让 DSH 自己处理（侧栏浏览器 / window.open）。
+   * 微任务里检查 defaultPrevented：DSH 已接管就跳过，没接管才由我们转交。
+   * 默认动作本来就被 sandbox 拦掉，晚一步不会造成导航。
+   */
+  function deferToHost(event, url) {
+    Promise.resolve().then(function () {
+      if (!event.defaultPrevented) handOff(url, 'link')
+    })
+  }
+
+  /**
+   * click / auxclick 的统一入口。
+   * @param {Event} event
+   * @param {boolean} middle 是否为 auxclick 的中键
+   */
+  function onActivate(event, middle) {
+    if (!acked || !linksEnabled) return
+    if (event.defaultPrevented) return
+    if (event.isTrusted === false) return
+    if (middle) {
+      if (event.button !== 1) return
+    } else if (event.button !== 0) {
+      return
+    }
+    var anchor = findAnchor(event)
+    if (!anchor) return
+    var url = externalHref(anchor)
+    if (!url) return
+    var target = targetOf(anchor)
+    // target=_self / 没写 target：按规格不接管（含修饰键与中键），保持 DSH 当前行为。
+    if (target === '' || target === '_self') return
+    var ctrlNewTab = event.ctrlKey && !macPlatform
+    var modified = event.metaKey || event.shiftKey || ctrlNewTab
+    // Alt+click 在浏览器里常被当作「下载链接」，不抢。
+    if (event.altKey && !modified) return
+    // macOS 的 Ctrl+click 是右键菜单，别改成新标签。
+    if (macPlatform && event.ctrlKey && !event.metaKey && !event.shiftKey && !event.altKey) return
+
+    if (modified || middle) {
+      takeOver(event, url)
+      return
+    }
+    if (target === '_blank') {
+      deferToHost(event, url)
+      return
+    }
+    // _parent / _top / 具名 target：sandbox 里本来打不开，直接接管。
+    takeOver(event, url)
+  }
+
+  function onClick(event) {
+    onActivate(event, false)
+  }
+
+  function onAuxClick(event) {
+    onActivate(event, true)
+  }
+
+  function installClickPatch() {
+    if (clickInstalled) return
+    try {
+      document.addEventListener('click', onClick, true)
+      document.addEventListener('auxclick', onAuxClick, true)
+      clickInstalled = true
+    } catch (e) { /* 文档不可用：保持惰性 */ }
+  }
+
+  function removeClickPatch() {
+    if (!clickInstalled) return
+    try {
+      document.removeEventListener('click', onClick, true)
+      document.removeEventListener('auxclick', onAuxClick, true)
+    } catch (e) { /* 页面正在卸载：忽略 */ }
+    clickInstalled = false
+  }
+
   function onHostMessage(event) {
     if (event.source !== window.parent) return
     var data = event.data
@@ -152,6 +315,10 @@ window.__ModuleLoader__.load({ id: 'dsh-vscode-open-external', factory: (require
       acked = true
       stopHello()
       installPatch()
+      // externalLinks 缺省（旧宿主）按 false：点击桥保持惰性，不改变既有行为。
+      linksEnabled = data.externalLinks === true
+      if (linksEnabled) installClickPatch()
+      else removeClickPatch()
     }
   }
 
@@ -164,13 +331,15 @@ window.__ModuleLoader__.load({ id: 'dsh-vscode-open-external', factory: (require
       window.removeEventListener('message', onHostMessage, false)
       stopHello()
       removePatch()
+      removeClickPatch()
     }
     if (ctx && typeof ctx.effect === 'function') ctx.effect(function () { arm(); return disarm })
     else arm()
-    // 供排障使用：控制台可查 __dshVscodeOpenExternal.acked()
+    // 供排障使用：控制台可查 __dshVscodeOpenExternal.acked() / .links()
     window.__dshVscodeOpenExternal = {
       version: PLUGIN_VERSION,
-      acked: function () { return acked }
+      acked: function () { return acked },
+      links: function () { return linksEnabled }
     }
   }
 

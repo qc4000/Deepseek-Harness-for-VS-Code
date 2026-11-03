@@ -86,7 +86,22 @@
         "dshPanel.installOpenExternalPlugin": {
           "type": "boolean",
           "default": true,
-          "description": "自动安装内置 dsh-vscode-open-external 插件（v1.1.0 起）：面板内 DSH 页面里的 window.open（典型：DeepSeek 账号登录的授权页）改为在本机系统浏览器打开——Remote-SSH / Remote-WSL 场景下由客户端（如 Windows）浏览器打开，解决远端没有图形浏览器时无法登录的问题"
+          "description": "自动安装内置 dsh-vscode-open-external 插件（v1.1.0 起）：接管 DSH 页面里的 window.open（典型：DeepSeek 账号登录的授权页）与 <a> 新窗口/新标签点击；window.open 在系统浏览器打开——Remote-SSH / Remote-WSL 场景下由客户端（如 Windows）浏览器打开，解决远端没有图形浏览器时无法登录的问题。<a> 点击的具体目标由 dshPanel.externalLinkAction 决定"
+        },
+        "dshPanel.externalLinkAction": {
+          "type": "string",
+          "default": "systemBrowser",
+          "enum": [
+            "off",
+            "systemBrowser",
+            "vscodeBrowser"
+          ],
+          "enumDescriptions": [
+            "不接管 <a> 的新窗口/新标签点击（保持 DSH 当前行为；window.open 的登录/新标签链路仍按原样打开）",
+            "用系统默认浏览器打开（Remote-SSH / Remote-WSL 下由客户端浏览器打开）",
+            "用 VS Code 内置浏览器（Simple Browser / 浏览器视图）在新标签页打开"
+          ],
+          "markdownDescription": "面板内点击 `<a target=\"_blank\">`、按住 Ctrl/Cmd/Shift 点击、或中键点击外部 http(s) 链接时的打开方式。DSH 自己接管的点击（例如聊天链接的「在侧栏打开」）不受影响；`target=\"_self\"` 与登录授权页保持 DSH/系统浏览器原行为。`off` 只关这个点击桥，不影响 `window.open` 的登录链路。"
         },
         "dshPanel.forwardVSCodeKeys": {
           "type": "boolean",
