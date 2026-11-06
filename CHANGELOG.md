@@ -43,6 +43,13 @@
   `dsh-changes-plugin` 63（先红后绿）；`npm test` 21 套 / 1008 项断言、
   `npm run test:all` 22 套 / 1008 项（含真实 dsh e2e）全绿。
 
+**内部（同步上游）**
+
+- **内置剪贴板插件改为真实文件分发**：`dsh-webview-clipboard` 源码移到
+  `dsh-plugins/dsh-webview-clipboard/`（与 file-links / open-external 等内置插件一致），
+  不再由扩展内模板字面量生成——消除正则反斜杠被模板转义的隐患，插件可单独语法检查；
+  中继协议与行为不变（原生 → 宿主 `vscode.env.clipboard` → `execCommand` 三级回退，见规格 007）。
+
 ## 1.0.7
 
 **文件链接（修复）**
