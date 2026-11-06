@@ -91,7 +91,7 @@
 | `dshPanel.focusReleaseKey` | `F6` | 把焦点交还 VS Code 的按键。按下后可使用任意自定义键位与两段式快捷键，办完事按 `Ctrl+Shift+J`（macOS `⇧⌘J`）直接跳回输入框；置空字符串可关闭（不影响快捷键转发） |
 | `dshPanel.focusInputEnabled` | `true` | 是否为「聚焦 DSH 输入框」提供默认键位 `Ctrl+Shift+J`（macOS `⇧⌘J`）。关闭后该组合彻底不生效（不占用你的按键），命令本身仍可在命令面板调用；换组合请在「键盘快捷方式」里搜 `dshPanel.focusInput` |
 
-### 面板内外部链接怎么打开（下一版起）
+### 面板内外部链接怎么打开（v1.1.0 起）
 
 DSH 被以跨源 iframe 嵌进 VS Code webview 时，webview 的 sandbox 不允许弹窗：`window.open`、
 `<a target="_blank">`、Ctrl/Cmd/Shift+点击、中键都可能「点了没反应」。内置插件
