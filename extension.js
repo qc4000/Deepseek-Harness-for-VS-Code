@@ -2013,19 +2013,53 @@ ${sidebarToolbarHtml}
   /** 需要裁掉的像素：实测侧栏宽度 + 展开态手柄余量；未测量时为 0（宁可不隐藏也不切内容）。 */
   function cropPixels() {
     if (!hidden || !measured) return 0;
+    // 抽屉态（dsh 0.2.2+）恒不裁：侧栏是浮层、不占 grid 轨道，按浮层宽裁必然切掉
+    // 对话区左侧；隐藏交给 DSH 自己的抽屉实现（spec 015 AC-2）。
+    if (measured.drawer === true) return 0;
     var w = Number(measured.sidebarWidth);
     if (!isFinite(w) || w <= 0) return 0;
     var px = Math.round(w) + (measured.collapsed ? 0 : HANDLE);
     return Math.max(0, Math.min(MAX_MEASURE, px));
   }
 
+  /**
+   * 当前是否处于 DSH 抽屉态（插件上报 drawer=true；旧插件缺该字段 → false，走 004 老语义）。
+   */
+  function inDrawer() {
+    return !!(measured && measured.drawer === true);
+  }
+
+  /**
+   * 按钮要显示的「侧栏当前是否不可见」：抽屉态看 DSH 自己的折叠标志（浮层在不在视口里），
+   * 其余看裁剪态（004 老语义，缺 drawer 字段时行为完全不变）。
+   */
+  function displayedHidden() {
+    return inDrawer() ? (measured.collapsed === true) : hidden;
+  }
+
+  /**
+   * 按钮与宿主命令 dsh-sidebar-toggle 共用的切换入口：
+   * grid 态切裁剪（004 原语义，含覆盖持久化，只改 CSS 变量不重载 iframe）；
+   * 抽屉态改发 layout-toggle 请求 DSH 原生展开/收起——裁剪隐藏浮层必然切对话区，
+   * 故抽屉态不改裁剪、不写覆盖（spec 015 AC-3）。
+   * @param {string} reason 'user' 表示用户意图（grid 态需持久化）
+   */
+  function toggleSidebarNow(reason) {
+    if (inDrawer()) {
+      postToFrame({ source: HOST_ID, type: 'layout-toggle' });
+      return;
+    }
+    setHidden(!hidden, reason);
+  }
+
   function updateToggle() {
     if (!toggle) return;
-    var label = hidden ? '显示 DSH 侧栏' : '隐藏 DSH 侧栏';
+    var shown = displayedHidden();
+    var label = shown ? '显示 DSH 侧栏' : '隐藏 DSH 侧栏';
     toggle.setAttribute('aria-label', label);
     toggle.setAttribute('title', label);
-    toggle.setAttribute('data-hidden', hidden ? 'true' : 'false');
-    if (toggleLabel) toggleLabel.textContent = hidden ? '显示侧栏' : '隐藏侧栏';
+    toggle.setAttribute('data-hidden', shown ? 'true' : 'false');
+    if (toggleLabel) toggleLabel.textContent = shown ? '显示侧栏' : '隐藏侧栏';
   }
 
   /** 把裁剪量与按钮状态同步到 DOM（只改 CSS 变量，不重载 iframe）。 */
@@ -2126,8 +2160,9 @@ ${sidebarToolbarHtml}
     });
   }
   if (toggle) {
-    // 只切 CSS 变量：DSH 的滚动位置、输入内容、运行中的任务都不受影响。
-    toggle.addEventListener('click', function () { setHidden(!hidden, 'user'); });
+    // grid 态只切 CSS 变量（DSH 的滚动位置、输入内容、运行中的任务都不受影响）；
+    // 抽屉态转调 DSH 原生收放（见 toggleSidebarNow）。
+    toggle.addEventListener('click', function () { toggleSidebarNow('user'); });
   }
   window.addEventListener('resize', function () {
     // 只有 auto 策略跟随宽度；用户手动覆盖之后不再自动改。
@@ -2222,10 +2257,22 @@ ${sidebarToolbarHtml}
     if (data.source === LAYOUT_ID) {
       // DSH 页面内布局插件发来的实测值：只认自己那个 iframe、且 origin 必须是 DSH 地址。
       if (!fromOurFrame(event)) return;
+      if (data.type === 'layout-toggle-result') {
+        // 抽屉态转调回执（015 AC-4）：无论成败都补一次权威测量——竞态（not-drawer）
+        // 与状态翻转都靠下一次上报自愈，按钮不会「点了没反应」。失败才上报宿主提示。
+        postToFrame({ source: HOST_ID, type: 'request-layout' });
+        var failReason = data.reason === 'unsupported' ? 'unsupported'
+          : (data.reason === 'failed' ? 'failed' : null);
+        if (data.ok !== true && failReason !== null) {
+          try { vscode.postMessage({ type: 'dsh-sidebar-toggle-failed', reason: failReason }); } catch (e) { /* 面板已销毁 */ }
+        }
+        return;
+      }
       var width = data.sidebarWidth;
-      // 只接受真正的有限数字且落在合理区间（展开 264-420 / 折叠 56 / 隐藏 0）。
+      // 只接受真正的有限数字且落在合理区间（展开 264-420 / 折叠 56 / 抽屉轨道 0 / 隐藏 0）。
       if (typeof width !== 'number' || !isFinite(width) || width < 0 || width > MAX_MEASURE) return;
-      measured = { sidebarWidth: width, collapsed: data.collapsed === true };
+      // drawer 为 dsh 0.2.2+ 抽屉态标志：只认严格 true，旧插件缺字段按 false 走 004 老语义。
+      measured = { sidebarWidth: width, collapsed: data.collapsed === true, drawer: data.drawer === true };
       applyLayout();
       return;
     }
@@ -2319,8 +2366,9 @@ ${sidebarToolbarHtml}
         } catch (e2) { /* ignore */ }
       }
     } else if (data.type === 'dsh-sidebar-toggle') {
-      // 宿主命令 / 快捷键：与点按钮等价（同样算用户意图，需要持久化）。
-      setHidden(!hidden, 'user');
+      // 宿主命令 / 快捷键：与点按钮等价（grid 态同样算用户意图，需要持久化；
+      // 抽屉态转调 DSH 原生展开/收起，不写覆盖）。
+      toggleSidebarNow('user');
     } else if (data.type === 'dsh-focus-input') {
       // 显式命令（dshPanel.focusInput）：先把焦点推进 iframe，再让页面插件把光标放进 composer。
       try { if (frame && typeof frame.focus === 'function') frame.focus(); } catch (e) { /* ignore */ }
@@ -2542,6 +2590,8 @@ const FORWARD_KEY_CODES = {
 
 /** 测量不可用的提示是否已弹过（每窗口只提醒一次）。 */
 let sidebarUnavailableNotified = false;
+/** 抽屉态转调失败的提示（unsupported / failed）各只提醒一次（spec 015 AC-4）。 */
+const sidebarToggleFailedNotified = { unsupported: false, failed: false };
 /** 工作区跟随的失败提示（插件未生效 / 旧版不支持 / 切换失败）各只提醒一次。 */
 let workspacePinUnavailableNotified = false;
 let workspacePinFailureNotified = false;
@@ -4707,6 +4757,20 @@ function handleWebviewMessage(msg, webview) {
       sidebarUnavailableNotified = true;
       vscode.window.setStatusBarMessage(
         'DSH 侧栏宽度不可用：本次未隐藏（布局测量插件未生效，可点「重启 dsh web」后重试）',
+        8000
+      );
+    }
+  } else if (msg && msg.type === 'dsh-sidebar-toggle-failed') {
+    // 抽屉态转调失败（spec 015 AC-4）：reason 只认白名单，未知值整条丢弃；
+    // unsupported / failed 各提示一次（避免每次点击刷屏），文案必须带出口动作。
+    const failReason = msg.reason === 'unsupported' ? 'unsupported'
+      : (msg.reason === 'failed' ? 'failed' : null);
+    if (failReason !== null && !sidebarToggleFailedNotified[failReason]) {
+      sidebarToggleFailedNotified[failReason] = true;
+      vscode.window.setStatusBarMessage(
+        failReason === 'unsupported'
+          ? '无法切换 DSH 侧栏：DSH 页面布局服务不可用（请点面板顶部「重启 dsh web」，仍无效则升级 dsh 后重试）'
+          : '切换 DSH 侧栏失败：DSH 页面返回错误（请点面板顶部「重启 dsh web」后重试）',
         8000
       );
     }

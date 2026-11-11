@@ -62,12 +62,17 @@ render(view)
 标签页接管时侧边栏只渲染占位页，标签页关闭后 `render(activeView)` 恢复。
 标签页 URL 会把 `127.0.0.1` ↔ `localhost` 互换（`getTabDisplayUrl`），制造不同 origin。
 
-**侧栏裁剪（v1.0.1）**：面板 HTML 是 `toolbar(28px) + stage(overflow:hidden) + clip(left:-crop; width:100%+crop) + iframe(zoom)`。
+**侧栏裁剪（v1.0.1；spec 015 修订抽屉态）**：面板 HTML 是 `toolbar(28px) + stage(overflow:hidden) + clip(left:-crop; width:100%+crop) + iframe(zoom)`。
 `--dsh-crop` 只写在未缩放的 `clip` 上，因此裁剪量与 `zoom` 无关；iframe 始终 `width:100%`。
-`crop = 实测侧栏宽度 + (折叠 ? 0 : 4)`（4px 避开 DSH 的 8px 拖动条热区），
-宽度由内置插件 `dsh-vscode-layout` 只读上报（`[class*="_sidebarCol"]` 的几何）。
+`crop = 上报的 grid 首轨道宽 + (折叠 ? 0 : 4)`（4px 避开 DSH 的 8px 拖动条热区），
+宽度由内置插件 `dsh-vscode-layout` 上报：**首选 frame 的 `grid-template-columns` 第一段**
+（导轨 56 / 展开 264–420 / 抽屉轨道 0），不可解析才回退 `[class*="_sidebarCol"]` 矩形。
+**dsh 0.2.2 起 `<768px` 是抽屉态**（侧栏变浮层、首轨道 0、收起只 `translate(-100%)` 矩形不回 0）：
+此时 `crop` 恒为 0——按浮层宽裁会切掉对话区左侧，且裁剪量会反过来改 DSH 视口、
+跨 768 断点形成 2-周期振荡（488–711px 实测闪烁，spec 015）；顶部按钮/命令改为经
+`layout-toggle` / `layout-toggle-result` 转调 DSH 原生 `ctx.layout.toggleSidebar()`。
 有效隐/显 = 手动覆盖 > `dshPanel.dshSidebar` > 宽度自适应（`< 1024` 隐藏，镜像 DSH 断点）。
-切换只改 CSS 变量，不重载 iframe。
+切换只改 CSS 变量（抽屉态只发一条消息），不重载 iframe。
 
 ## 4. 链路 B：受管认证代理
 
@@ -324,9 +329,11 @@ webview → 宿主：{ type:'dsh-workspace-pin-unavailable' }   // 8s 内没收�
    `vscode.lm.registerLanguageModelChatProvider`；旧版 VS Code 上桥接不可用，目前只有
    `console.warn`（用户不可见）——与宪法第三条冲突，已登记为候选规格 `002`。
 6. **`freePort` 会杀端口占用进程**：仅「重启」且用户确认后调用；不要把它挪到自动路径。
-7. **侧栏裁剪依赖 DSH 内部布局**：`_sidebarCol` 类名 token、264–420/56 三档宽度、1024 断点、8px 拖动条、
-   300ms 折叠动画都是 dsh 0.2.x 的实现细节。DSH 升级后若读取不到宽度，插件会沉默、宿主会提示
-   「未隐藏」并保持原样——**不会切掉对话内容**；但需要回归 `test/dsh-sidebar.test.js` + 实机确认。
+7. **侧栏裁剪依赖 DSH 内部布局**：`_sidebarCol` 类名 token、264–420/56/抽屉轨道 0、1024 与 768 两个断点、
+   `data-sidebar-collapsed` / `data-sidebar-drawer` 属性、8px 拖动条、300ms 折叠动画都是 dsh 0.2.x 的
+   实现细节（抽屉态自 0.2.2 起）。DSH 升级后若读取不到宽度，插件会沉默、宿主会提示
+   「未隐藏」并保持原样——**不会切掉对话内容**；但需要回归 `test/dsh-sidebar.test.js`
+   （含 240–1400 固定点收敛扫描，spec 015 AC-6）+ 实机确认。
 8. **快捷键转发只覆盖工作台级白名单**：不支持两段式（`ctrl+k …`，需页面侧前缀状态机，会与 DSH 自己的
    `secondCode` 序列互相干扰）；不读用户 `keybindings.json`（Remote 下文件在客户端、扩展在服务端）；
    命中 DSH 键位目录时一律让位，用户想拿回某个键需在 DSH 快捷键面板里改绑；`F6` 交还焦点后再按 F6
