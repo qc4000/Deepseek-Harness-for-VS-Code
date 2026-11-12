@@ -71,8 +71,13 @@ const outputChannels = [];
 const registeredCmds = {};
 let profileRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-sidebar-'));
 process.env.DSH_HOME = profileRoot;
-// 调试日志落盘（spec 018）写到 <HOME>/.dsh-debug/：测试里把 HOME 也指到临时目录。
-process.env.HOME = profileRoot;
+// 调试日志落盘（spec 018/021）用到 os.homedir()：测试里把它指到临时目录。
+// 注意 Windows 的 os.homedir() 读 USERPROFILE（不是 HOME）——两个都设，CI 的 windows 矩阵才稳。
+function setTestHome(dir) {
+  process.env.HOME = dir;
+  process.env.USERPROFILE = dir;
+}
+setTestHome(profileRoot);
 const shownDocs = [];
 const vscodeStub = {
   workspace: {
@@ -976,7 +981,7 @@ function report(realm, sidebarWidth, collapsed, drawer, innerWidth) {
     // IO 失败不影响功能：HOME 指向「.dsh-debug 是普通文件」的目录
     const brokenHome = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-broken-'));
     fs.writeFileSync(path.join(brokenHome, '.dsh-debug'), 'not-a-dir');
-    process.env.HOME = brokenHome;
+    setTestHome(brokenHome);
     I.resetDebugLogState();
     const stBefore = statusBarMessages.length;
     I.debugLog('test', 'boom');
@@ -986,7 +991,7 @@ function report(realm, sidebarWidth, collapsed, drawer, innerWidth) {
     I.handleWebviewMessage({ type: 'dsh-sidebar-diag', reason: 'manual',
       host: [{ t: 1, ev: 'layout', v: 'w=1' }], plugin: [] }, null);
     ok(outputChannels[outputChannels.length - 1].lines.length > chBefore, '落盘失败时输出面板照常可写');
-    process.env.HOME = profileRoot;
+    setTestHome(profileRoot);
     I.resetDebugLogState();
     delete config['dshPanel.debugLogToFile'];
   }
@@ -1080,11 +1085,14 @@ function report(realm, sidebarWidth, collapsed, drawer, innerWidth) {
     fs.writeFileSync(path.join(legacyDir, I.debugLogFileName()), 'legacy-line-1\n');
     const target = path.join(migrationHome, 'globalStorage', 'logs', I.debugLogFileName());
     const savedHome = process.env.HOME;
-    process.env.HOME = migrationHome;
+    const savedProfile = process.env.USERPROFILE;
+    setTestHome(migrationHome);
     ok(I.migrateLegacyDebugLog(target) === true, '首次把旧位置日志迁移到新位置');
     ok(fs.readFileSync(target, 'utf8').indexOf('legacy-line-1') >= 0, '迁移内容完整');
     ok(I.migrateLegacyDebugLog(target) === false, '目标已存在 → 不重复迁移、不覆盖');
     process.env.HOME = savedHome;
+    if (savedProfile === undefined) delete process.env.USERPROFILE;
+    else process.env.USERPROFILE = savedProfile;
     fs.rmSync(migrationHome, { recursive: true, force: true });
   }
 
