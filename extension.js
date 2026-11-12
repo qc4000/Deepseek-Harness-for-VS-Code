@@ -1804,7 +1804,7 @@ function jsonForScript(value) {
  * @param {'revealAndOpen'|'revealOnly'|'off'} [requestedFileLinkMode] 工作区文件链接接管开关
  * @returns {string}
  */
-function buildIframeHtml(url, scale, requestedFileLinkMode, sidebar, pinPathRaw) {
+function buildIframeHtml(url, scale, requestedFileLinkMode, sidebar, pinPathRaw, debugFile) {
   // 解析显示地址，仅放行 http/https，并把其精确 origin 写入 frame-src，
   // 不再通配整个本机回环地址段，保持 webview 沙箱最小权限。
   // Remote 场景下 asExternalUri 可能返回带转发端口的 localhost 地址，也可能返回 HTTPS 转发域名，
@@ -1923,6 +1923,9 @@ ${sidebarToolbarHtml}
   var sidebarChrome = ${jsonForScript(sidebarChrome)};
   var sidebarPolicy = ${jsonForScript(sidebarPolicyValue)};
   var sidebarOverride = ${sidebarOverrideValue === null ? 'null' : String(sidebarOverrideValue)};
+  // 调试日志落盘开关（spec 019）：只有开启时才把事件流批量推给扩展；
+  // 关闭时这里恒为 false，热路径上只多一次布尔判断（零 IO、零定时器）。
+  var debugFileLog = ${debugFile === undefined ? (debugLogEnabled() ? 'true' : 'false') : (debugFile === true ? 'true' : 'false')};
   var NARROW = ${SIDEBAR_NARROW_WIDTH};
   var HANDLE = ${SIDEBAR_HANDLE_ALLOWANCE};
   var MAX_MEASURE = ${SIDEBAR_MAX_MEASURE};
@@ -1930,7 +1933,118 @@ ${sidebarToolbarHtml}
   var measured = null;
   var unavailableReported = false;
   var unavailableTimer = null;
+  // spec 016：宿主诊断环形日志（与页面日志合并后交扩展写输出面板）、
+  // 导出等待（页面 600ms 超时兜底）、auto 重算尾沿去抖（150ms）。
+  var DIAG_LOG_MAX = 120;
+  var DIAG_WAIT_MS = 600;
+  var HIDDEN_DEBOUNCE_MS = 150;
+  // 落盘事件流（spec 019）：开启时把同一批现场攒 1s 再发，关闭时零开销。
+  var TRACE_BATCH_MS = 1000;
+  var TRACE_MAX = 200;
+  var tracePending = [];
+  var traceTimer = null;
+  var diagLog = [];
+  var diagPending = false;
+  var diagTimer = null;
+  var hiddenTimer = null;
+  // 实测比例的可信状态（spec 020）：只有「我们主动要来的那一拍」才算数——
+  // 页面在收到 request-layout 后按当前裁剪重排再报，innerWidth 与 iframe 实宽必然同拍；
+  // 自发上报（尤其拖动中）一律不采信，避免把拖动抖动算成缩放。
+  var trustedRatio = 0;          // 0 = 尚未校准（裁剪按 1 处理）
+  var calibPendingStage = -1;    // 已发请求、等待应答；记录请求时的面板宽
+  var calibLastAskAt = 0;
+  var CALIB_MIN_INTERVAL_MS = 500;
   var hidden = computeHidden();
+  /** 记一条宿主侧诊断日志（环形 120 条；只记布局数值与短枚举，不落盘）。 */
+  function diagLogPush(ev, v) {
+    var entry = { t: Date.now(), ev: String(ev).slice(0, 24), v: String(v === undefined ? '' : v).slice(0, 160) };
+    diagLog.push(entry);
+    if (diagLog.length > DIAG_LOG_MAX) diagLog.shift();
+    // 关闭落盘时这里直接返回（一次布尔判断），不建队列、不起定时器、不发消息。
+    traceQueue(entry);
+  }
+
+  /** 攒批事件流：开启落盘时才排队，满 200 条或 1s 到点发一包。 */
+  function traceQueue(entry) {
+    if (!debugFileLog) return;
+    tracePending.push(entry);
+    if (tracePending.length >= TRACE_MAX) { traceFlush(); return; }
+    if (traceTimer === null) traceTimer = setTimeout(traceFlush, TRACE_BATCH_MS);
+  }
+
+  /** 发送并清空增量（失败静默：面板已销毁时日志本就无处可写）。 */
+  function traceFlush() {
+    if (traceTimer !== null) { clearTimeout(traceTimer); traceTimer = null; }
+    if (!debugFileLog || tracePending.length === 0) { tracePending = []; return; }
+    var batch = tracePending.slice(0, TRACE_MAX);
+    tracePending = [];
+    try { vscode.postMessage({ type: 'dsh-sidebar-trace', entries: batch }); } catch (e) { /* 面板已销毁 */ }
+  }
+  diagLogPush('init', 'policy=' + sidebarPolicy + ' override='
+    + (sidebarOverride === null ? 'null' : String(sidebarOverride))
+    + ' hidden=' + (hidden ? 1 : 0) + ' stage=' + stageWidth() + ' scale=' + current);
+
+  /**
+   * 页面日志白名单截断：页面是不可信输入，中继先按形状过滤 + 截断再转发
+   * （扩展侧还会再做一道，双层校验；宪法第五条）。
+   * @param {any} list
+   * @returns {Array} 最多 200 条 {t, ev, v}
+   */
+  function sanitizeDiagEntries(list) {
+    var out = [];
+    if (!Array.isArray(list)) return out;
+    for (var i = 0; i < list.length && out.length < 200; i++) {
+      var e = list[i];
+      if (!e || typeof e !== 'object') continue;
+      if (typeof e.t !== 'number' || !isFinite(e.t) || e.t < 0) continue;
+      if (typeof e.ev !== 'string' || !/^[a-z][a-z0-9-]{0,23}$/.test(e.ev)) continue;
+      if (typeof e.v !== 'string') continue;
+      out.push({
+        t: Math.round(e.t),
+        ev: e.ev,
+        v: e.v.replace(/[\\u0000-\\u001f\\u007f]/g, '').slice(0, 160)
+      });
+    }
+    return out;
+  }
+
+  /**
+   * 把一包诊断（宿主环形日志 + 页面日志）交给扩展写输出面板（spec 016）。
+   * reason 只认小写短横线形状；字段净化在扩展侧再做一道（防御性双层校验）。
+   * @param {string} reason 诊断原因（flip-storm / request / timeout / manual …）
+   * @param {any[]} pluginEntries 页面侧日志条目（可空）
+   * @param {boolean} pluginUnavailable 页面未回包（老插件/加载中）
+   */
+  function sendSidebarDiag(reason, pluginEntries, pluginUnavailable) {
+    var r = String(reason === undefined || reason === null ? 'manual' : reason);
+    if (!/^[a-z][a-z0-9-]{0,31}$/.test(r)) r = 'manual';
+    var plugin = sanitizeDiagEntries(pluginEntries);
+    diagLogPush('diag', 'reason=' + r + ' host=' + diagLog.length
+      + ' plugin=' + (pluginUnavailable === true ? 'unavailable' : String(plugin.length)));
+    try {
+      vscode.postMessage({
+        type: 'dsh-sidebar-diag',
+        reason: r,
+        host: diagLog.slice(-200),
+        plugin: plugin,
+        pluginUnavailable: pluginUnavailable === true
+      });
+    } catch (e) { /* 面板已销毁 */ }
+  }
+
+  /** 页面侧诊断包：导出回包清掉超时兜底；风暴等自发包直接合并上报。 */
+  function handlePageDiag(data) {
+    var reason = String(data.reason === undefined || data.reason === null ? 'manual' : data.reason);
+    diagLogPush('recv', 'layout-diag reason=' + reason.slice(0, 32));
+    var entries = Array.isArray(data.entries) ? data.entries : [];
+    if (reason === 'request') {
+      diagPending = false;
+      if (diagTimer !== null) { clearTimeout(diagTimer); diagTimer = null; }
+      sendSidebarDiag('request', entries, false);
+      return;
+    }
+    sendSidebarDiag(reason, entries, false);
+  }
   function frameWindow() {
     return frame && frame.contentWindow ? frame.contentWindow : null;
   }
@@ -2010,7 +2124,74 @@ ${sidebarToolbarHtml}
     return stageWidth() < NARROW;
   }
 
-  /** 需要裁掉的像素：实测侧栏宽度 + 展开态手柄余量；未测量时为 0（宁可不隐藏也不切内容）。 */
+  /** iframe 实宽（webview px）：clip = stage + crop，含 #dsh-frame 的 zoom 渲染。 */
+  function frameWidthNow() {
+    try {
+      if (frame && typeof frame.getBoundingClientRect === 'function') {
+        var r = frame.getBoundingClientRect().width;
+        if (isFinite(r) && r > 0) return r;
+      }
+    } catch (e) { /* 量不到 → 按 1 处理 */ }
+    return 0;
+  }
+
+  /**
+   * 由一次上报配对出**实测缩放比例**：iframe 实宽(webview px) ÷ 页面视口 innerWidth(DSH px)。
+   * 两者取自同一时刻（页面刚按当前裁剪完成重排），比例与裁剪量本身无关 → 回路仍单调不振荡。
+   * 量不到 / 越界（<0.5 或 >2）→ 回退 1（= spec 015 行为）并留痕，绝不按离谱比例裁
+   * （spec 016 AC-4；004 §10 的「实测量自校准」，不做任何预测）。
+   * @param {number} iw 插件上报的 innerWidth（DSH px）
+   * @returns {number} 比例（1 = 不校准）
+   */
+  /**
+   * 由一次上报配对出**实测缩放比例**：iframe 实宽(webview px) ÷ 页面视口 innerWidth(DSH px)。
+   * 两者取自同一时刻（页面刚按当前裁剪完成重排），比例与裁剪量本身无关 → 回路仍单调不振荡。
+   * 量不到 / 越界（<0.5 或 >2）→ 回退 1（= spec 015 行为）并留痕，绝不按离谱比例裁
+   * （spec 016 AC-4；004 §10 的「实测量自校准」，不做任何预测）。
+   * @param {number} iw 插件上报的 innerWidth（DSH px）
+   * @param {number} rect iframe 实宽（webview px；缺省现量）
+   * @returns {number} 比例（1 = 不校准）
+   */
+  function pickRatio(iw, rect) {
+    var r = typeof rect === 'number' && isFinite(rect) && rect > 0 ? rect : frameWidthNow();
+    var stage = stageWidth();
+    if (!isFinite(iw) || !(iw > 0) || !(r > 0)) return trustedRatio > 0 ? trustedRatio : 1;
+    var ratio = r / iw;
+    if (!(ratio >= 0.5) || !(ratio <= 2)) {
+      // 越界（多半是拖动中的陈旧配对）：不采信，也清掉在途请求，等下一次重试。
+      diagLogPush('ratio-fallback', 'ratio=' + Math.round(ratio * 1000) / 1000
+        + ' rect=' + Math.round(r) + ' iw=' + Math.round(iw));
+      calibPendingStage = -1;
+      return trustedRatio > 0 ? trustedRatio : 1;
+    }
+    // 只采纳「请求发出后、面板宽没变」的那一拍：页面是收到请求才重排的，两量同拍。
+    if (calibPendingStage >= 0 && Math.abs(stage - calibPendingStage) <= 1) {
+      trustedRatio = Math.round(ratio * 10000) / 10000;
+      calibPendingStage = -1;
+      diagLogPush('ratio-set', 'ratio=' + trustedRatio + ' stage=' + Math.round(stage));
+      return trustedRatio;
+    }
+    if (calibPendingStage >= 0) calibPendingStage = -1; // 面板动了：这次配对作废
+    return trustedRatio > 0 ? trustedRatio : 1;
+  }
+
+  /** 需要校准但还没可信比例时，主动要一次「配对样本」（限流 500ms，避免拖动中刷屏）。 */
+  function maybeRequestCalibration() {
+    if (trustedRatio > 0 || calibPendingStage >= 0) return;
+    if (!hidden || !measured || measured.drawer === true) return;
+    var t = Date.now();
+    if (t - calibLastAskAt < CALIB_MIN_INTERVAL_MS) return;
+    calibLastAskAt = t;
+    calibPendingStage = stageWidth();
+    diagLogPush('ratio-request', 'stage=' + calibPendingStage);
+    postToFrame({ source: HOST_ID, type: 'request-layout' });
+  }
+
+  /**
+   * 需要裁掉的像素：(轨道 + 手柄余量) × 实测比例；未测量时为 0（宁可不隐藏也不切内容）。
+   * 比例在收到上报时就定格在 measured.ratio，之后只用这个定值——避免「裁剪变了再量一次」
+   * 把不同拍的两个量混在一起（spec 016 AC-4）。
+   */
   function cropPixels() {
     if (!hidden || !measured) return 0;
     // 抽屉态（dsh 0.2.2+）恒不裁：侧栏是浮层、不占 grid 轨道，按浮层宽裁必然切掉
@@ -2018,7 +2199,8 @@ ${sidebarToolbarHtml}
     if (measured.drawer === true) return 0;
     var w = Number(measured.sidebarWidth);
     if (!isFinite(w) || w <= 0) return 0;
-    var px = Math.round(w) + (measured.collapsed ? 0 : HANDLE);
+    var ratio = measured.ratio > 0 ? measured.ratio : 1;
+    var px = Math.round((w + (measured.collapsed ? 0 : HANDLE)) * ratio);
     return Math.max(0, Math.min(MAX_MEASURE, px));
   }
 
@@ -2040,12 +2222,19 @@ ${sidebarToolbarHtml}
   /**
    * 按钮与宿主命令 dsh-sidebar-toggle 共用的切换入口：
    * grid 态切裁剪（004 原语义，含覆盖持久化，只改 CSS 变量不重载 iframe）；
-   * 抽屉态改发 layout-toggle 请求 DSH 原生展开/收起——裁剪隐藏浮层必然切对话区，
-   * 故抽屉态不改裁剪、不写覆盖（spec 015 AC-3）。
-   * @param {string} reason 'user' 表示用户意图（grid 态需持久化）
+   * 抽屉态请求 DSH 原生展开/收起——裁剪隐藏浮层必然切对话区，故不许用裁剪；
+   * 但「显示/隐藏」是同一份用户意图，抽屉态也必须写覆盖：否则拉宽离开抽屉态后
+   * auto 的「<1024 隐藏」会把侧栏重新裁掉（spec 017）。
+   * @param {string} reason 'user' 表示用户意图（需持久化覆盖）
    */
   function toggleSidebarNow(reason) {
+    diagLogPush('toggle', 'from=' + String(reason || '?') + ' drawer=' + (inDrawer() ? 1 : 0)
+      + ' hidden=' + (hidden ? 1 : 0) + ' ovr=' + (sidebarOverride === null ? 'null' : (sidebarOverride ? 1 : 0)));
     if (inDrawer()) {
+      // 点击后的目标可见性 = 当前 collapsed 取反：当前收起 → 变可见（hidden=false）；
+      // 当前展开 → 变不可见（hidden=true）。先落覆盖再转调，两者互不依赖。
+      var wantHidden = !(measured && measured.collapsed === true);
+      setHidden(wantHidden, reason);
       postToFrame({ source: HOST_ID, type: 'layout-toggle' });
       return;
     }
@@ -2068,6 +2257,8 @@ ${sidebarToolbarHtml}
       clip.style.setProperty('--dsh-crop', cropPixels() + 'px');
     }
     updateToggle();
+    // 裁剪已应用（iframe 宽度随之改变）→ 此时要一次配对样本最准（spec 020）。
+    maybeRequestCalibration();
   }
 
   /** 隐藏但拿不到测量值：明确告知（禁止静默「点了没反应」）。 */
@@ -2083,6 +2274,12 @@ ${sidebarToolbarHtml}
 
   function setHidden(value, reason) {
     hidden = !!value;
+    // 手动切换必须同步**页面内**的覆盖态：覆盖值本来只在构建 HTML 时注入，
+    // 若这里不同步，下一次 resize 的 auto 重算（016 去抖）会按「<1024 隐藏」
+    // 把用户刚做的选择冲掉——抽屉态拉宽必现，grid 态也会被拖动重置（spec 017）。
+    if (reason === 'user') sidebarOverride = hidden;
+    diagLogPush('hidden', 'hidden=' + (hidden ? 1 : 0) + ' reason=' + String(reason || 'policy')
+      + ' ovr=' + (sidebarOverride === null ? 'null' : (sidebarOverride ? 1 : 0)) + ' stage=' + stageWidth());
     applyLayout();
     if (hidden) scheduleUnavailable();
     if (reason === 'user') {
@@ -2164,14 +2361,44 @@ ${sidebarToolbarHtml}
     // 抽屉态转调 DSH 原生收放（见 toggleSidebarNow）。
     toggle.addEventListener('click', function () { toggleSidebarNow('user'); });
   }
-  window.addEventListener('resize', function () {
-    // 只有 auto 策略跟随宽度；用户手动覆盖之后不再自动改。
-    if (sidebarOverride !== null || sidebarPolicy !== 'auto') return;
+  /**
+   * auto 策略的重算（尾沿去抖，spec 016 AC-6）：拖动 VS Code 侧边栏时 resize 每帧都来，
+   * 逐帧重算会让裁剪在 1024 断点来回翻（侧栏反复显隐 = 用户看到的闪烁）。
+   * 静默 150ms 后按**最终**宽度只算一次；静态规则与 004 完全一致（<1024 隐藏）。
+   * 覆盖/配置分支不参与去抖（它们各有立即生效的入口）。
+   */
+  function recomputeHidden() {
+    hiddenTimer = null;
+    var ovr = sidebarOverride === null ? 'null' : (sidebarOverride ? 1 : 0);
+    if (sidebarOverride !== null || sidebarPolicy !== 'auto') {
+      // 覆盖/配置优先：跳过 auto 重算也要留痕，否则日志里看不出「为什么没被藏回去」。
+      diagLogPush('recompute', 'stage=' + stageWidth() + ' skipped=1 ovr=' + ovr + ' policy=' + sidebarPolicy);
+      return;
+    }
     var next = computeHidden();
+    diagLogPush('recompute', 'stage=' + stageWidth() + ' hidden=' + (next ? 1 : 0) + ' ovr=' + ovr);
     if (next === hidden) return;
     hidden = next;
+    diagLogPush('hidden', 'hidden=' + (hidden ? 1 : 0));
     applyLayout();
     if (hidden) scheduleUnavailable();
+  }
+  // 覆盖/配置优先时，拖动会被忽略；但要在日志里留痕（1s 最多一条，避免拖动刷屏）——
+  // 「拉宽后侧栏没被藏回去」正是靠这条证明 auto 没有介入（spec 017 的排障依据）。
+  var lastResizeSkipAt = 0;
+  window.addEventListener('resize', function () {
+    if (sidebarOverride !== null || sidebarPolicy !== 'auto') {
+      var tNow = Date.now();
+      if (tNow - lastResizeSkipAt >= 1000) {
+        lastResizeSkipAt = tNow;
+        diagLogPush('resize', 'skipped=1 ovr='
+          + (sidebarOverride === null ? 'null' : (sidebarOverride ? 1 : 0))
+          + ' policy=' + sidebarPolicy + ' stage=' + stageWidth());
+      }
+      return;
+    }
+    if (hiddenTimer !== null) clearTimeout(hiddenTimer);
+    hiddenTimer = setTimeout(recomputeHidden, HIDDEN_DEBOUNCE_MS);
   });
   function apply(scale) {
     var n = Number(scale);
@@ -2180,6 +2407,11 @@ ${sidebarToolbarHtml}
     if (n === current) return;
     current = n;
     frame.style.zoom = String(n);
+    // 缩放比变了：旧比例作废，重新要一次配对样本（spec 020）。
+    trustedRatio = 0;
+    calibPendingStage = -1;
+    calibLastAskAt = 0;
+    maybeRequestCalibration();
   }
   window.addEventListener('message', function (event) {
     var data = event.data;
@@ -2257,6 +2489,11 @@ ${sidebarToolbarHtml}
     if (data.source === LAYOUT_ID) {
       // DSH 页面内布局插件发来的实测值：只认自己那个 iframe、且 origin 必须是 DSH 地址。
       if (!fromOurFrame(event)) return;
+      if (data.type === 'layout-diag') {
+        // 页面侧现场（风暴自动上报 / 导出回包，spec 016 AC-2/AC-3）：合并宿主日志交扩展。
+        handlePageDiag(data);
+        return;
+      }
       if (data.type === 'layout-toggle-result') {
         // 抽屉态转调回执（015 AC-4）：无论成败都补一次权威测量——竞态（not-drawer）
         // 与状态翻转都靠下一次上报自愈，按钮不会「点了没反应」。失败才上报宿主提示。
@@ -2272,7 +2509,23 @@ ${sidebarToolbarHtml}
       // 只接受真正的有限数字且落在合理区间（展开 264-420 / 折叠 56 / 抽屉轨道 0 / 隐藏 0）。
       if (typeof width !== 'number' || !isFinite(width) || width < 0 || width > MAX_MEASURE) return;
       // drawer 为 dsh 0.2.2+ 抽屉态标志：只认严格 true，旧插件缺字段按 false 走 004 老语义。
-      measured = { sidebarWidth: width, collapsed: data.collapsed === true, drawer: data.drawer === true };
+      // innerWidth（页面视口，DSH px）与本次几何同拍上报 → 在此定格实测 ratio（spec 016）。
+      var inner = typeof data.innerWidth === 'number' && isFinite(data.innerWidth) && data.innerWidth > 0
+        ? data.innerWidth : 0;
+      var rectNow = frameWidthNow();
+      var ratio = pickRatio(inner, rectNow);
+      measured = {
+        sidebarWidth: width,
+        collapsed: data.collapsed === true,
+        drawer: data.drawer === true,
+        innerWidth: inner,
+        ratio: ratio
+      };
+      // box 因子（rect ÷ clip 宽）是 004 §10 悬案的判定依据：≠1 说明 CSS zoom 缩放了 iframe 盒。
+      var clipNow = stageWidth() + (parseFloat(clip.style.getPropertyValue('--dsh-crop')) || 0);
+      diagLogPush('layout', 'w=' + width + ' c=' + (measured.collapsed ? 1 : 0)
+        + ' d=' + (measured.drawer ? 1 : 0) + ' iw=' + inner + ' ratio=' + ratio
+        + ' rect=' + Math.round(rectNow) + ' clip=' + Math.round(clipNow));
       applyLayout();
       return;
     }
@@ -2369,6 +2622,30 @@ ${sidebarToolbarHtml}
       // 宿主命令 / 快捷键：与点按钮等价（grid 态同样算用户意图，需要持久化；
       // 抽屉态转调 DSH 原生展开/收起，不写覆盖）。
       toggleSidebarNow('user');
+    } else if (data.type === 'dsh-debug-log-file') {
+      // 落盘开关热更新（spec 019）：开启后的事件才会进队列；关闭时清空未发送的增量。
+      debugFileLog = data.enabled === true;
+      diagLogPush('config', 'debugFile=' + (debugFileLog ? 1 : 0));
+      if (!debugFileLog) {
+        if (traceTimer !== null) { clearTimeout(traceTimer); traceTimer = null; }
+        tracePending = [];
+      } else {
+        traceFlush();
+      }
+    } else if (data.type === 'dsh-sidebar-diag-request') {
+      // 导出命令（spec 016 AC-3）：向页面要现场日志；在途即忽略重复，
+      // 600ms 无回包（老插件/页面仍在加载）→ 带宿主日志兜底上报并标注 unavailable。
+      if (diagPending) return;
+      diagPending = true;
+      diagLogPush('recv', 'dsh-sidebar-diag-request');
+      postToFrame({ source: HOST_ID, type: 'layout-diag-request' });
+      if (diagTimer !== null) clearTimeout(diagTimer);
+      diagTimer = setTimeout(function () {
+        diagTimer = null;
+        if (!diagPending) return;
+        diagPending = false;
+        sendSidebarDiag('timeout', [], true);
+      }, DIAG_WAIT_MS);
     } else if (data.type === 'dsh-focus-input') {
       // 显式命令（dshPanel.focusInput）：先把焦点推进 iframe，再让页面插件把光标放进 composer。
       try { if (frame && typeof frame.focus === 'function') frame.focus(); } catch (e) { /* ignore */ }
@@ -2387,6 +2664,7 @@ ${sidebarToolbarHtml}
       sidebarOverride = null;
       if (toolbar && toolbar.style) toolbar.style.display = sidebarPolicy === 'show' ? 'none' : 'flex';
       hidden = computeHidden();
+      diagLogPush('config', 'policy=' + sidebarPolicy + ' hidden=' + (hidden ? 1 : 0));
       applyLayout();
       if (hidden) scheduleUnavailable();
     } else if (data.type === 'dsh-external-links-config') {
@@ -4692,6 +4970,383 @@ function notifyClipboardFailure(reason) {
   );
 }
 
+// =====================================================================
+// 调试日志落盘（spec 018）：默认关闭（`dshPanel.debugLogToFile`）。开启后把
+// 侧栏诊断包与关键事件追加到 <用户主目录>/.dsh-debug/dsh-vscode-debug.log，
+// 超过 2MB 轮转为 .log.1（只留一份备份）。为什么落盘：输出面板/控制台在用户
+// 重启窗口后就没了，而排障往往要跨会话看时间线；文件也方便用户直接回传。
+// 三条底线：只写布局数值与短枚举（不写 token/路径/对话内容）；落盘前统一脱敏；
+// 任何 IO 失败都只提示一次、绝不影响面板功能。
+// =====================================================================
+const DEBUG_LOG_KEY = 'dshPanel.debugLogToFile';
+const DEBUG_LOG_MAX_BYTES = 2 * 1024 * 1024;
+const DEBUG_LOG_FILE = 'dsh-vscode-debug.log';
+/** 调试日志文件的初始化状态与累计字节数（避免每行都 stat）。 */
+const debugLogState = { ready: false, path: '', size: 0 };
+/** 开启提示只弹一次（每窗口）。 */
+let debugLogNotified = false;
+/** IO 失败提示只给一次（不刷屏；仍继续尝试后续写入）。 */
+let debugLogWarned = false;
+
+/** 调试日志是否开启（配置读取失败按关闭处理）。 */
+function debugLogEnabled() {
+  try {
+    return cfg().get(DEBUG_LOG_KEY, false) === true;
+  } catch (e) {
+    return false;
+  }
+}
+
+/** 调试日志文件名（不含目录）。 */
+function debugLogFileName() {
+  return DEBUG_LOG_FILE;
+}
+
+/**
+ * 由扩展上下文取日志目录：优先 `globalStorageUri`（VS Code 规范的扩展私有目录，
+ * 跨会话保留、随扩展安装/卸载管理），取不到时回退用户主目录的 `.dsh-debug`
+ * （早期版本位置 / 非 VS Code 宿主 / 测试环境）。
+ * @param {any} ctx 扩展上下文（可为 null）
+ * @returns {string} 目录绝对路径
+ */
+function debugLogDirFrom(ctx) {
+  try {
+    if (ctx && ctx.globalStorageUri && typeof ctx.globalStorageUri.fsPath === 'string'
+      && ctx.globalStorageUri.fsPath !== '') {
+      return path.join(ctx.globalStorageUri.fsPath, 'logs');
+    }
+  } catch (e) { /* 忽略：回退 */ }
+  return path.join(os.homedir(), '.dsh-debug');
+}
+
+/** 调试日志目录（当前扩展实例的）。 */
+function debugLogDir() {
+  return debugLogDirFrom(gContext);
+}
+
+/** 纯函数：由存储根算日志路径（便于测试/文档说明）。 */
+function debugLogPathFor(baseDir) {
+  return path.join(baseDir || path.join(os.homedir(), '.dsh-debug'), DEBUG_LOG_FILE);
+}
+
+/** 调试日志文件绝对路径。 */
+function debugLogPath() {
+  return debugLogPathFor(debugLogDir());
+}
+
+/**
+ * 首次迁移：早期版本把日志写在 `~/.dsh-debug/`，挪到 globalStorage 后把历史文件复制过来一次
+ * （目标已存在则不动，绝不覆盖用户已有日志）。
+ * @param {string} targetPath 新位置的日志文件路径
+ * @returns {boolean} 是否发生了迁移
+ */
+function migrateLegacyDebugLog(targetPath) {
+  const legacyPath = path.join(os.homedir(), '.dsh-debug', DEBUG_LOG_FILE);
+  if (!targetPath || targetPath === legacyPath) return false;
+  try {
+    if (!fs.existsSync(legacyPath)) return false;
+    if (fs.existsSync(targetPath)) return false;
+    fs.mkdirSync(path.dirname(targetPath), { recursive: true });
+    fs.copyFileSync(legacyPath, targetPath);
+    const legacyBak = legacyPath + '.1';
+    if (fs.existsSync(legacyBak)) fs.copyFileSync(legacyBak, targetPath + '.1');
+    return true;
+  } catch (e) {
+    console.warn('[DeepSeek Harness] 迁移旧调试日志失败：' + ((e && e.message) || e));
+    return false;
+  }
+}
+
+/**
+ * 落盘前脱敏：DSH 的地址/回执里可能带 `?token=…`，日志绝不能把它写出去。
+ * 同时统一换行，避免一行日志被拆成多行后时间戳错位。
+ * @param {string} text
+ * @returns {string}
+ */
+function scrubDebugText(text) {
+  return String(text === undefined || text === null ? '' : text)
+    .replace(/([?&]token=)[^&\s"']+/gi, '$1***')
+    .replace(/\btoken=[^&\s"']+/gi, 'token=***')
+    .replace(/\r\n?/g, '\n');
+}
+
+/** 确保目录与文件状态就绪（幂等）；失败返回 false，由调用方决定是否提示。 */
+/** 重置缓冲状态（设置变更/测试用）：下次写入重新探测目录与文件大小。 */
+function resetDebugLogState() {
+  debugLogState.ready = false;
+  debugLogState.path = '';
+  debugLogState.size = 0;
+}
+
+function ensureDebugLog() {
+  if (debugLogState.ready) return true;
+  const p = debugLogPath();
+  try {
+    fs.mkdirSync(path.dirname(p), { recursive: true });
+    // 旧位置有历史日志、新位置还没有 → 复制一次（不覆盖）。
+    migrateLegacyDebugLog(p);
+    let size = 0;
+    try {
+      const st = fs.statSync(p);
+      if (st && typeof st.size === 'number') size = st.size;
+    } catch (e) { /* 文件还不存在：从 0 开始 */ }
+    debugLogState.path = p;
+    debugLogState.size = size;
+    debugLogState.ready = true;
+    return true;
+  } catch (e) {
+    console.warn('[DeepSeek Harness] 准备调试日志目录失败：' + ((e && e.message) || e));
+    return false;
+  }
+}
+
+/** 轮转：把当前文件改名为 .1（覆盖旧备份），从空文件继续。 */
+function rotateDebugLog() {
+  const p = debugLogState.path || debugLogPath();
+  try {
+    fs.renameSync(p, p + '.1');
+  } catch (e) { /* 改名失败就继续追加（宁可文件大也别丢日志） */ }
+  debugLogState.size = 0;
+}
+
+/**
+ * 追加一行调试日志（带时间戳与标签）。
+ * @param {string} tag 事件标签（如 sidebar-diag / config / activate）
+ * @param {string} text 正文（可含换行；落盘前脱敏）
+ */
+function debugLog(tag, text) {
+  if (!debugLogEnabled()) return;
+  if (!ensureDebugLog()) {
+    if (!debugLogWarned) {
+      debugLogWarned = true;
+      vscode.window.setStatusBarMessage(
+        '调试日志写入失败：无法创建 ' + debugLogPath() + '（请检查目录权限，或在设置里关闭 dshPanel.debugLogToFile）',
+        8000
+      );
+    }
+    return;
+  }
+  try {
+    const body = scrubDebugText(text);
+    const line = '[' + new Date().toISOString() + '] [' + tag + '] ' + body + '\n';
+    const bytes = Buffer.byteLength(line, 'utf8');
+    if (debugLogState.size + bytes > DEBUG_LOG_MAX_BYTES) rotateDebugLog();
+    fs.appendFileSync(debugLogState.path, line, 'utf8');
+    debugLogState.size += bytes;
+    if (!debugLogNotified) {
+      debugLogNotified = true;
+      // 开启必须用户可见（否则「开了却没输出」又是一团谜）。
+      vscode.window.setStatusBarMessage('调试日志已开启：' + debugLogState.path + '（超过 2MB 自动轮转为 .1）', 10000);
+    }
+  } catch (e) {
+    console.warn('[DeepSeek Harness] 写调试日志失败：' + ((e && e.message) || e));
+    debugLogState.ready = false;
+  }
+}
+
+/** 设置项变化：开启时立即建目录并提示路径；关闭时复位一次性提示。 */
+function onDebugLogSettingChanged() {
+  resetDebugLogState();
+  const target = activeTab || activeView;
+  const enabled = debugLogEnabled();
+  if (!enabled) {
+    debugLogNotified = false;
+    // 通知面板停止推送事件流（关闭后热路径只留一次布尔判断）。
+    if (target) {
+      try { target.webview.postMessage({ type: 'dsh-debug-log-file', enabled: false }); } catch (e) { /* 面板已销毁 */ }
+    }
+    return;
+  }
+  debugLog('config', 'debugLogToFile=1 path=' + debugLogPath());
+  // 环境行（缩放/字号）是复盘错位问题的必要信息，开启时写一次。
+  debugLog('env', sidebarDiagEnvLine());
+  if (target) {
+    try { target.webview.postMessage({ type: 'dsh-debug-log-file', enabled: true }); } catch (e) { /* 面板已销毁 */ }
+  }
+}
+
+/** 命令：在编辑器里打开调试日志（未生成时给出开启指引，禁止「点了没反应」）。 */
+function openDebugLog() {
+  const p = debugLogPath();
+  try {
+    if (!fs.existsSync(p)) {
+      vscode.window.showInformationMessage(
+        '调试日志尚未生成：请在设置里打开「dshPanel.debugLogToFile」（默认关闭），复现问题后再执行本命令。路径：' + p
+      );
+      return;
+    }
+    return vscode.window.showTextDocument(vscode.Uri.file(p), { preview: false });
+  } catch (e) {
+    vscode.window.showErrorMessage('打开调试日志失败：' + ((e && e.message) || e) + '（路径：' + p + '）');
+    return undefined;
+  }
+}
+
+// =====================================================================
+// 侧栏抖动诊断（spec 016）：页面插件 + webview 中继把两侧时间线合成一包，
+// 这里做**最后一道净化**并写入输出面板；风暴自动上报与手动导出共用同一条出口。
+// 输出面板立即可见、一键复制即可回传（004 §10 取证需求）；需要跨会话留档时，
+// 打开 dshPanel.debugLogToFile 会同时追加到文件（spec 018）。
+// =====================================================================
+/** 诊断输出面板（懒创建；不可用时只提示一次，不抛给调用方）。 */
+let sidebarDiagChannel = null;
+/** 抖动风暴的状态栏提示每窗口只给一次（不刷屏）。 */
+let sidebarDiagNotified = false;
+/** 导出命令在途标志（重复触发即忽略）。 */
+let sidebarDiagPending = false;
+let sidebarDiagTimer = null;
+/** 扩展侧兜底等待：webview 连回包都没有（脚本未加载）时说明情况。 */
+const SIDEBAR_DIAG_WATCHDOG_MS = 1500;
+/** 诊断载荷上限（条数/单条长度），与 webview 侧一致。 */
+const SIDEBAR_DIAG_MAX_ENTRIES = 200;
+const SIDEBAR_DIAG_MAX_VALUE = 160;
+
+/** 取/建诊断输出面板；创建失败返回 null（调用方提示，不静默）。 */
+function sidebarDiagOutput() {
+  if (sidebarDiagChannel) return sidebarDiagChannel;
+  try {
+    sidebarDiagChannel = vscode.window.createOutputChannel('DeepSeek Harness');
+  } catch (e) {
+    console.warn('[DeepSeek Harness] 创建诊断输出面板失败：' + ((e && e.message) || e));
+    return null;
+  }
+  return sidebarDiagChannel;
+}
+
+/**
+ * 净化诊断载荷（宪法第五条）：`reason` 只认小写短横线形状；条目只认
+ * `{t:number≥0, ev:小写短枚举, v:可打印串}`，`v` 去控制字符并截断 160，条数 ≤200；
+ * 任一条不合规整条丢弃，绝不让任意字符串进输出面板。
+ * @param {any} raw webview 发来的 `dsh-sidebar-diag`
+ * @returns {{reason:string, host:Array, plugin:Array, pluginUnavailable:boolean}|null}
+ */
+function normalizeDiagEntries(list) {
+  if (!Array.isArray(list)) return [];
+  const out = [];
+  for (const item of list.slice(0, SIDEBAR_DIAG_MAX_ENTRIES)) {
+    if (!item || typeof item !== 'object') continue;
+    if (typeof item.t !== 'number' || !isFinite(item.t) || item.t < 0) continue;
+    if (typeof item.ev !== 'string' || !/^[a-z][a-z0-9-]{0,23}$/.test(item.ev)) continue;
+    if (typeof item.v !== 'string') continue;
+    out.push({
+      t: Math.round(item.t),
+      ev: item.ev,
+      v: item.v.replace(/[\u0000-\u001f\u007f]/g, '').slice(0, SIDEBAR_DIAG_MAX_VALUE)
+    });
+  }
+  return out;
+}
+
+function normalizeSidebarDiag(raw) {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
+  const reason = typeof raw.reason === 'string' ? raw.reason : '';
+  if (!/^[a-z][a-z0-9-]{0,31}$/.test(reason)) return null;
+  return {
+    reason,
+    host: normalizeDiagEntries(raw.host),
+    plugin: normalizeDiagEntries(raw.plugin),
+    pluginUnavailable: raw.pluginUnavailable === true
+  };
+}
+
+/** 事件条目时间戳 → 本地可读的 `HH:MM:SS.mmm`（写文件用，避免每行再带 ISO 前缀）。 */
+function diagClock(t) {
+  try {
+    return new Date(t).toISOString().slice(11, 23);
+  } catch (e) {
+    return '--:--:--.---';
+  }
+}
+
+/** 环境行：把「缩放/字号」写进日志——残留错位最常由它们引起（004 §10/§12）。 */
+function sidebarDiagEnvLine() {
+  try {
+    const zoom = vscode.workspace.getConfiguration('window').get('zoomLevel', 0);
+    const fontSize = vscode.workspace.getConfiguration('editor').get('fontSize', 16);
+    const scale = Math.round(getFontScale() * 1000) / 1000;
+    return `window.zoomLevel=${zoom} editor.fontSize=${fontSize} fontScale=${scale}`;
+  } catch (e) {
+    return '环境读取失败';
+  }
+}
+
+/**
+ * 把一包净化后的诊断写进输出面板（含两侧时间线与相对时间）。
+ * @param {{reason:string, host:Array, plugin:Array, pluginUnavailable:boolean}} diag
+ * @returns {boolean} 是否写入成功
+ */
+function writeSidebarDiag(diag) {
+  const out = [];
+  const stamp = new Date().toISOString().replace('T', ' ').slice(0, 23);
+  out.push(`── DSH 侧栏诊断 ${stamp} 原因=${diag.reason} ──`);
+  out.push('环境: ' + sidebarDiagEnvLine()
+    + (diag.pluginUnavailable ? '｜页面日志未回包（插件未生效？可点「重启 dsh web」）' : ''));
+  out.push(`页面日志 ${diag.plugin.length} 条 / 宿主日志 ${diag.host.length} 条`);
+  const all = diag.host.concat(diag.plugin);
+  let base = 0;
+  if (all.length > 0) base = Math.min.apply(null, all.map((e) => e.t));
+  const line = (side, e) => out.push(`  [${side}] +${e.t - base}ms ${e.ev} ${e.v}`);
+  for (const e of diag.host) line('宿主', e);
+  for (const e of diag.plugin) line('页面', e);
+  out.push('');
+  // 输出面板（立即可见）+ 可选落盘（跨会话留档，spec 018）走同一份文本。
+  debugLog('sidebar-diag', out.join('\n'));
+  const ch = sidebarDiagOutput();
+  if (!ch) {
+    vscode.window.setStatusBarMessage('DSH 侧栏诊断写入失败：输出面板不可用（请重试导出命令）', 8000);
+    return false;
+  }
+  for (const l of out) ch.appendLine(l);
+  return true;
+}
+
+/** 扩展侧兜底：webview 连回包都没有（脚本未加载/面板已销毁）时，明确告知并给出出口。 */
+function writeSidebarDiagMissing() {
+  const ch = sidebarDiagOutput();
+  if (!ch) {
+    vscode.window.setStatusBarMessage('DSH 侧栏诊断写入失败：输出面板不可用（请重试导出命令）', 8000);
+    return;
+  }
+  const stamp = new Date().toISOString().replace('T', ' ').slice(0, 23);
+  const out = [
+    `── DSH 侧栏诊断 ${stamp} 原因=timeout ──`,
+    '环境: ' + sidebarDiagEnvLine(),
+    '未收到页面回包：面板可能仍在加载，或布局测量插件未生效（点面板顶部「重启 dsh web」后重试）。',
+    ''
+  ];
+  debugLog('sidebar-diag', out.join('\n'));
+  for (const l of out) ch.appendLine(l);
+  try { ch.show(true); } catch (e) { /* 面板不可用 */ }
+}
+
+/**
+ * 命令 `dshPanel.diagnoseSidebar`：向当前面板要一包现场日志（spec 016 AC-3）。
+ * 页面/中继在 600ms 内合并回包；扩展侧 1.5s 兜底（连回包都没有时写说明）。
+ */
+function diagnoseSidebarCmd() {
+  const target = activeTab || activeView;
+  if (!target) {
+    vscode.window.showInformationMessage('DeepSeek Harness 面板尚未打开，请先点击侧边栏图标。');
+    return;
+  }
+  if (sidebarDiagPending) return; // 在途即忽略重复
+  debugLog('diagnose', 'request（手动导出侧栏诊断）');
+  sidebarDiagPending = true;
+  try {
+    target.webview.postMessage({ type: 'dsh-sidebar-diag-request' });
+  } catch (e) {
+    sidebarDiagPending = false;
+    return;
+  }
+  if (sidebarDiagTimer !== null) clearTimeout(sidebarDiagTimer);
+  sidebarDiagTimer = setTimeout(() => {
+    sidebarDiagTimer = null;
+    if (!sidebarDiagPending) return;
+    sidebarDiagPending = false;
+    writeSidebarDiagMissing();
+  }, SIDEBAR_DIAG_WATCHDOG_MS);
+}
+
 /**
  * 处理 webview 消息：DSH 页面内点击外部链接时，按 dshPanel.externalLinkAction 用
  * 系统浏览器 / VS Code 内置浏览器打开；点击工作区文件链接在 VS Code 资源管理器中
@@ -4748,8 +5403,10 @@ function handleWebviewMessage(msg, webview) {
     }
   } else if (msg && msg.type === 'dsh-sidebar-state') {
     // 用户手动切换：记住覆盖值，窗口重载/切换视图后保持（配置变更时清除）。
-    if (typeof msg.hidden === 'boolean' && msg.reason === 'user' && gContext) {
-      gContext.globalState.update(SIDEBAR_OVERRIDE_KEY, msg.hidden).then(() => {}, () => {});
+    // 日志不依赖 gContext（持久化不可用时也要能留档）。
+    if (typeof msg.hidden === 'boolean' && msg.reason === 'user') {
+      debugLog('sidebar-state', 'hidden=' + (msg.hidden ? 1 : 0) + ' policy=' + sidebarPolicy());
+      if (gContext) gContext.globalState.update(SIDEBAR_OVERRIDE_KEY, msg.hidden).then(() => {}, () => {});
     }
   } else if (msg && msg.type === 'dsh-sidebar-unavailable') {
     // 隐藏了却拿不到侧栏宽度：不静默，给一次可见提示（每窗口一次）。
@@ -4772,6 +5429,35 @@ function handleWebviewMessage(msg, webview) {
           ? '无法切换 DSH 侧栏：DSH 页面布局服务不可用（请点面板顶部「重启 dsh web」，仍无效则升级 dsh 后重试）'
           : '切换 DSH 侧栏失败：DSH 页面返回错误（请点面板顶部「重启 dsh web」后重试）',
         8000
+      );
+    }
+  } else if (msg && msg.type === 'dsh-sidebar-trace') {
+    // 面板侧事件流（spec 019）：只在开启落盘时由中继批量推送，1 包 1 次追加（不逐条写）。
+    if (!debugLogEnabled()) return;
+    const entries = normalizeDiagEntries(msg.entries);
+    if (entries.length === 0) return;
+    debugLog('sidebar-trace', entries.map((e) => diagClock(e.t) + ' ' + e.ev + ' ' + e.v).join('\n'));
+  } else if (msg && msg.type === 'dsh-sidebar-diag') {
+    // 侧栏抖动诊断包（spec 016）：净化后写输出面板；风暴给一次状态栏提示，
+    // 手动导出（reason=request）自动展开面板；两者都清掉扩展侧兜底等待。
+    const diag = normalizeSidebarDiag(msg);
+    if (diag === null) return;
+    sidebarDiagPending = false;
+    if (sidebarDiagTimer !== null) {
+      clearTimeout(sidebarDiagTimer);
+      sidebarDiagTimer = null;
+    }
+    writeSidebarDiag(diag);
+    if (diag.reason === 'request') {
+      const ch = sidebarDiagOutput();
+      if (ch && typeof ch.show === 'function') {
+        try { ch.show(true); } catch (e) { /* 面板不可用 */ }
+      }
+    } else if (diag.reason === 'flip-storm' && !sidebarDiagNotified) {
+      sidebarDiagNotified = true;
+      vscode.window.setStatusBarMessage(
+        '检测到 DSH 侧栏抖动，诊断已写入输出面板「DeepSeek Harness」（命令：DeepSeek Harness: 导出 DSH 侧栏诊断）',
+        10000
       );
     }
   } else if (msg && msg.type === 'dsh-workspace-pin-unavailable') {
@@ -4826,6 +5512,7 @@ function handleWebviewMessage(msg, webview) {
  * 注意不能走整页 reload——那会丢失 DSH 的滚动位置与输入内容。
  */
 function applySidebarPolicyChange() {
+  debugLog('sidebar-policy', 'policy=' + sidebarPolicy());
   if (gContext) {
     gContext.globalState.update(SIDEBAR_OVERRIDE_KEY, undefined).then(() => {}, () => {});
   }
@@ -4844,6 +5531,7 @@ function applySidebarPolicyChange() {
  */
 function notifyDshPluginsChanged() {
   vscode.window.showInformationMessage('已自动安装/更新 DSH 插件（dsh-drop-caret / dsh-webview-clipboard / dsh-vscode-file-links / dsh-vscode-layout / dsh-vscode-workspace / dsh-vscode-keys / dsh-vscode-open-external），请点击面板顶部的「重启 dsh web」使其生效。');
+  debugLog('plugins', '内置插件有变更 → 需重启 dsh web 生效');
 }
 
 /**
@@ -6546,7 +7234,11 @@ function activate(context) {
   syncFocusInputContext();
   context.subscriptions.push(vscode.workspace.onDidChangeConfiguration((e) => {
     if (e.affectsConfiguration(FOCUS_INPUT_KEY)) syncFocusInputContext();
+    if (e.affectsConfiguration(DEBUG_LOG_KEY)) onDebugLogSettingChanged();
   }));
+  debugLog('activate', 'version=' + ((context && context.extension && context.extension.packageJSON
+    && context.extension.packageJSON.version) || '?') + ' log=' + debugLogPath());
+  debugLog('env', sidebarDiagEnvLine());
 
   const provider = {
     resolveWebviewView(view) {
@@ -6820,7 +7512,14 @@ function activate(context) {
     vscode.window.showInformationMessage('已重置 DSH 会话映射：下次提问将创建新的 DSH 会话。');
   });
 
-  context.subscriptions.push(viewSub, openInTabCmd, refreshCmd, openBrowserCmd, restartCmd, wsSub, sendSelectionCmd, chatStatusCmd, diagnoseModelsCmd, resetChatCmd, toggleDshSidebarCmd);
+  // 导出侧栏抖动诊断（spec 016）：页面 + 中继两侧时间线写输出面板「DeepSeek Harness」。
+  const diagnoseSidebarCmdReg = vscode.commands.registerCommand('dshPanel.diagnoseSidebar', () => {
+    diagnoseSidebarCmd();
+  });
+  // 打开调试日志文件（spec 018）：未开启/未生成时给开启指引，不静默。
+  const openDebugLogCmd = vscode.commands.registerCommand('dshPanel.openDebugLog', () => openDebugLog());
+
+  context.subscriptions.push(viewSub, openInTabCmd, refreshCmd, openBrowserCmd, restartCmd, wsSub, sendSelectionCmd, chatStatusCmd, diagnoseModelsCmd, resetChatCmd, toggleDshSidebarCmd, diagnoseSidebarCmdReg, openDebugLogCmd);
 }
 
 function deactivate() {
@@ -6951,6 +7650,20 @@ module.exports.__internals = {
   openInVSCodeBrowser,
   buildIframeHtml,
   handleWebviewMessage,
+  normalizeSidebarDiag,
+  normalizeDiagEntries,
+  diagnoseSidebarCmd,
+  writeSidebarDiagMissing,
+  debugLog,
+  debugLogPath,
+  debugLogDirFrom,
+  debugLogPathFor,
+  debugLogFileName,
+  migrateLegacyDebugLog,
+  debugLogEnabled,
+  resetDebugLogState,
+  onDebugLogSettingChanged,
+  openDebugLog,
   resolveWorkspaceTarget,
   normalizeLinkPath,
   isInsideFolder,

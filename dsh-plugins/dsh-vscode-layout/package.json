@@ -1,6 +1,6 @@
 {
   "name": "dsh-vscode-layout",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "DeepSeek Harness 插件：把 DSH Web 页面左侧栏对布局的真实占位（grid 首轨道）与折叠/抽屉状态上报给外层宿主，供 Deepseek-Harness-for-VS-Code 扩展做视口裁剪；抽屉态（dsh 0.2.2+ 的 <768px）收到宿主请求时调用公开服务 ctx.layout.toggleSidebar() 展开/收起（不改 DOM、不拦事件）。",
   "keywords": [
     "deepseek",

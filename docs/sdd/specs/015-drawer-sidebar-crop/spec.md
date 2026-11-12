@@ -63,8 +63,9 @@ spec 004 §12 已记录同类「旧值回写形成振荡」问题并决定暂缓
 - **AC-2（抽屉态不裁剪）**：Given `dshPanel.dshSidebar=auto|hide` 且收到 `sidebarWidth:0, drawer:true`，
   Then `--dsh-crop` 为 `0px`（对话区左缘不动）；再给 `collapsed:false` 同样为 `0px`（展开的抽屉也不裁）。
 - **AC-3（抽屉态按钮转调）**：Given 抽屉态且已握手，When 点工具条按钮（或宿主发 `dsh-sidebar-toggle`），
-  Then 向 iframe 发送 `{type:'layout-toggle'}`、**不**发送 `dsh-sidebar-state`（不写手动覆盖）、
-  裁剪量不变；按钮 `aria-label` 随上报的 `collapsed` 翻转（关 → 「显示 DSH 侧栏」、开 → 「隐藏 DSH 侧栏」）。
+  Then 向 iframe 发送 `{type:'layout-toggle'}`、**同时**发 `dsh-sidebar-state{hidden: 点击后的可见性取反, reason:'user'}`
+  （017 修订：不写覆盖会导致拉宽后又被 auto 藏回去）、裁剪量不变；按钮 `aria-label` 随上报的 `collapsed`
+  翻转（关 → 「显示 DSH 侧栏」、开 → 「隐藏 DSH 侧栏」）。
 - **AC-4（失败可见 / 竞态自愈）**：Given 插件回 `{type:'layout-toggle-result', ok:false, reason:'unsupported'}`，
   Then webview 向扩展发 `dsh-sidebar-toggle-failed`（reason 白名单），扩展状态栏出现一次中文提示
   （含「重启 dsh web / 升级 dsh」出口）且不重复刷屏；Given `reason:'not-drawer'`，Then 不提示，
@@ -146,3 +147,4 @@ spec 004 §12 已记录同类「旧值回写形成振荡」问题并决定暂缓
 | --- | --- | --- |
 | 2026-11-09 | 初稿（用户拍板方案 A：抽屉态转调 DSH 原生收放；范围不含 004 §12 其余已知问题） | dsh 0.2.2-rc.1 抽屉态与 004 裁剪契约冲突，实测闪烁 + 左切 |
 | 2026-11-09 | 实现完成（插件 0.1.1 → 0.2.0、中继抽屉分流、宿主提示、收敛扫描），状态 → implemented；实机 F5 待补 | 先红后绿：`dsh-sidebar` 61 → 90 项，全量 1152 项通过 |
+| 2026-11-12 | AC-3 修订：抽屉态点击**同时写覆盖**（原「不写覆盖」） | 拉宽离开抽屉态后被 auto 重新隐藏，由 [spec 017](../017-drawer-manual-override/spec.md) 承接 |

@@ -62,17 +62,39 @@ render(view)
 标签页接管时侧边栏只渲染占位页，标签页关闭后 `render(activeView)` 恢复。
 标签页 URL 会把 `127.0.0.1` ↔ `localhost` 互换（`getTabDisplayUrl`），制造不同 origin。
 
-**侧栏裁剪（v1.0.1；spec 015 修订抽屉态）**：面板 HTML 是 `toolbar(28px) + stage(overflow:hidden) + clip(left:-crop; width:100%+crop) + iframe(zoom)`。
-`--dsh-crop` 只写在未缩放的 `clip` 上，因此裁剪量与 `zoom` 无关；iframe 始终 `width:100%`。
-`crop = 上报的 grid 首轨道宽 + (折叠 ? 0 : 4)`（4px 避开 DSH 的 8px 拖动条热区），
+**侧栏裁剪（v1.0.1；spec 015 抽屉态、spec 016 实测缩放校准）**：面板 HTML 是 `toolbar(28px) + stage(overflow:hidden) + clip(left:-crop; width:100%+crop) + iframe(zoom)`。
+`--dsh-crop` 只写在未缩放的 `clip` 上。
+`crop = round((上报的 grid 首轨道宽 + (折叠 ? 0 : 4)) × ratio)`（4px 避开 DSH 的 8px 拖动条热区），
 宽度由内置插件 `dsh-vscode-layout` 上报：**首选 frame 的 `grid-template-columns` 第一段**
 （导轨 56 / 展开 264–420 / 抽屉轨道 0），不可解析才回退 `[class*="_sidebarCol"]` 矩形。
+`ratio = iframe 实宽(webview px) ÷ 插件上报的 innerWidth（DSH px）`，**只在请求-应答配对时采信**：
+需要裁剪且尚无比例 → 发 `request-layout`（记下请求时的面板宽）→ 页面按当前裁剪重排后回报 →
+面板宽未变才记为可信（spec 020）；拖动中/自发上报一律沿用上次可信值（初始 1）。
+两者同拍时比例与裁剪量无关 → 回路仍单调。为什么需要它：`#dsh-frame` 带 `zoom: editor.fontSize/16`，
+DSH 内部 px 与 webview px 不等（004 §12 的 66px 残留条 = `264 × (1.25−1)`）；
+量不到或越界（<0.5 / >2）回退 `ratio=1` 并留痕（`ratio-fallback`）。
 **dsh 0.2.2 起 `<768px` 是抽屉态**（侧栏变浮层、首轨道 0、收起只 `translate(-100%)` 矩形不回 0）：
 此时 `crop` 恒为 0——按浮层宽裁会切掉对话区左侧，且裁剪量会反过来改 DSH 视口、
 跨 768 断点形成 2-周期振荡（488–711px 实测闪烁，spec 015）；顶部按钮/命令改为经
-`layout-toggle` / `layout-toggle-result` 转调 DSH 原生 `ctx.layout.toggleSidebar()`。
-有效隐/显 = 手动覆盖 > `dshPanel.dshSidebar` > 宽度自适应（`< 1024` 隐藏，镜像 DSH 断点）。
+`layout-toggle` / `layout-toggle-result` 转调 DSH 原生 `ctx.layout.toggleSidebar()`；
+点击同时写手动覆盖并同步页面内 `sidebarOverride`——否则拉宽离开抽屉态后又被 auto 的 `<1024 隐藏` 冲掉
+（spec 017）。
+有效隐/显 = 手动覆盖 > `dshPanel.dshSidebar` > 宽度自适应（`< 1024` 隐藏，镜像 DSH 断点；
+`resize` 走 150ms 尾沿去抖，避免拖动时在断点来回翻转，spec 016）。
 切换只改 CSS 变量（抽屉态只发一条消息），不重载 iframe。
+
+**侧栏抖动诊断（spec 016）**：插件环形 120 条 `{t, ev, v}`（只记布局数值与短枚举，不落盘）；
+折叠/抽屉 band 1s 内翻转 ≥7 次 → 自动 `layout-diag(flip-storm)`（10s 限流）；中继把页面日志与
+自己的 120 条环形日志合成 `dsh-sidebar-diag` → 扩展 `normalizeSidebarDiag` 净化 → 输出面板
+「DeepSeek Harness」，风暴只给一次状态栏提示。命令 `dshPanel.diagnoseSidebar` 手动导出
+（中继 600ms 等页面回包、扩展 1.5s 兜底写说明），页面内也可 `__dshVscodeLayout.logs()/diag()`。
+可选落盘（spec 018）：`dshPanel.debugLogToFile`（默认关）开启后，同一份文本同时追加到
+`<globalStorageUri>/logs/dsh-vscode-debug.log`（无上下文时回退 `~/.dsh-debug/`；升级时把旧文件复制一次；
+2MB 轮转为 `.log.1`，落盘前 `token=…` 脱敏），
+命令 `dshPanel.openDebugLog` 打开该文件；IO 失败只提示一次、不影响面板。
+开启落盘时中继还会把**事件流**按批（1s / 单包 ≤200 条）推给扩展，逐包一次追加
+（`[sidebar-trace]`，含 `layout/recompute/hidden/resize/ratio-fallback` 与 `[env]` 缩放信息）；
+关闭时中继不建队列、不起定时器、不发消息，热路径只多一次布尔判断（spec 019）。
 
 ## 4. 链路 B：受管认证代理
 

@@ -19,6 +19,32 @@
  *  9) 插件侧：grid 首轨优先测量（矩形 280 不算数）+ 矩形回退、`drawer` 上报、转调
  *     （未握手/非抽屉/服务缺失/抛错四种出口）；
  * 10) 扩展宿主：转调失败提示每窗口一次 + reason 白名单。
+ *
+ * spec 016（拖动/缩放残留闪烁 + 诊断日志）新增：
+ * 11) 插件诊断环形日志（形状/上限/clear）、`innerWidth` 上报、翻转风暴自动取证与 10s 限流；
+ * 12) 缩放实测校准：crop = round((轨道+手柄余量) × ratio)，ratio 缺失/越界回退 1，抽屉态仍 0；
+ * 13) auto 策略拖动去抖：150ms 静默后按最终宽度只翻一次，覆盖/show 不参与；
+ * 14) 诊断链路：layout-diag 合并宿主日志上报、导出请求 600ms 合并/超时兜底、ratio 回退留痕；
+ * 15) 扩展宿主：normalizeSidebarDiag 白名单净化、输出面板写入、状态栏一次提示、命令与兜底文案；
+ * 16) 收敛扫描扩到 4 档缩放比例（0.75/0.875/1/1.25）仍无 2-周期、分段期望 round(轨道×s)。
+ *
+ * spec 017（手动选择跨断点保持）新增：
+ * 17) 抽屉态点「显示/隐藏」同时写覆盖（dsh-sidebar-state）并同步页面内 sidebarOverride；
+ *     拉宽到 900/1200 后仍按用户选择（不再被 auto/去抖重算冲掉），拉回抽屉态展示仍按 collapsed；
+ *     grid 态手动显示后拖动同样保持。
+ *
+ * spec 018（调试日志落盘）新增：
+ * 18) dshPanel.debugLogToFile 默认关（不建文件）、开启后诊断包与事件写入
+ *     <HOME>/.dsh-debug/dsh-vscode-debug.log、落盘前 token 脱敏、超 2MB 轮转 .log.1、
+ *     命令「打开调试日志」打开/给开启指引、目录不可写时提示一次且不影响输出面板。
+ *
+ * spec 019（事件流自动落盘）新增：
+ * 19) 关闭时零开销（不建队列/不起定时器/不发消息）、开启后按批（1s、单包 ≤200）推送
+ *     layout/recompute 等现场并一次追加到文件、热开关立即生效、条目白名单净化、[env] 环境行。
+ *
+ * spec 020（比例配对）新增：
+ * 20) 缩放比例只在「request-layout 应答 + 面板宽未变」时采信；自发上报/拖动中的样本作废，
+ *     沿用上次可信值（初始 1），避免把拖动幅度误算成比例；字号变化后重校。
  */
 const assert = require('assert');
 const path = require('path');
@@ -39,8 +65,15 @@ function ok(cond, name) {
 const config = {};
 // 扩展侧状态栏提示捕获（spec 015 AC-4：转调失败提示要能被断言）。
 const statusBarMessages = [];
+// spec 016：信息提示、输出面板、命令注册捕获（诊断导出链路要能被断言）。
+const infoMessages = [];
+const outputChannels = [];
+const registeredCmds = {};
 let profileRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-sidebar-'));
 process.env.DSH_HOME = profileRoot;
+// 调试日志落盘（spec 018）写到 <HOME>/.dsh-debug/：测试里把 HOME 也指到临时目录。
+process.env.HOME = profileRoot;
+const shownDocs = [];
 const vscodeStub = {
   workspace: {
     getConfiguration: () => ({ get: (k, d) => (Object.prototype.hasOwnProperty.call(config, k) ? config[k] : d) }),
@@ -48,13 +81,31 @@ const vscodeStub = {
   },
   env: { remoteName: undefined },
   window: {
-    showWarningMessage: async () => undefined,
-    showInformationMessage: async () => undefined,
-    showErrorMessage: async () => undefined,
-    setStatusBarMessage: (text, ms) => { statusBarMessages.push({ text, ms }); return { dispose() {} }; }
+    showWarningMessage: async (m) => { infoMessages.push(m); return undefined; },
+    showInformationMessage: async (m) => { infoMessages.push(m); return undefined; },
+    showErrorMessage: async (m) => { infoMessages.push(m); return undefined; },
+    setStatusBarMessage: (text, ms) => { statusBarMessages.push({ text, ms }); return { dispose() {} }; },
+    showTextDocument: async (uri) => { shownDocs.push(uri); return {}; },
+    createOutputChannel: (name) => {
+      const ch = {
+        name,
+        lines: [],
+        shown: 0,
+        appendLine(s) { this.lines.push(String(s)); },
+        show() { this.shown += 1; },
+        clear() { this.lines = []; }
+      };
+      outputChannels.push(ch);
+      return ch;
+    }
   },
-  commands: { registerCommand: () => ({ dispose() {} }) },
-  Uri: { parse: (u) => ({ toString: () => u }) }
+  commands: {
+    registerCommand: (id, fn) => { registeredCmds[id] = fn; return { dispose() {} }; }
+  },
+  Uri: {
+    parse: (u) => ({ toString: () => u }),
+    file: (p) => ({ fsPath: p, path: p, toString: () => p })
+  }
 };
 const origLoad = Module._load;
 Module._load = function (request) {
@@ -73,7 +124,7 @@ function makeRealm(opts) {
   const html = I.buildIframeHtml(DSH_ORIGIN, o.scale || 1, o.mode || 'revealAndOpen', {
     policy: o.policy || 'auto',
     override: o.override === undefined ? null : o.override
-  });
+  }, undefined, o.debug === true);
   const m = /<script nonce="[^"]*">([\s\S]*?)<\/script>/.exec(html);
   const script = m ? m[1] : '';
 
@@ -119,6 +170,12 @@ function makeRealm(opts) {
   const toolbar = el('dsh-toolbar');
   const frame = el('dsh-frame');
   frame.contentWindow = { postMessage: (payload, origin) => frameMessages.push({ payload, origin }) };
+  // iframe 实宽（webview px）= clip 宽 = **当前** stage 宽 + 裁剪量 —— spec 016 实测 ratio 的分子。
+  frame.getBoundingClientRect = function () {
+    const c = parseInt(clip.style.getPropertyValue('--dsh-crop'), 10);
+    const base = typeof stage.clientWidth === 'number' ? stage.clientWidth : (o.width === undefined ? 800 : o.width);
+    return { width: base + (Number.isFinite(c) ? c : 0), height: 600 };
+  };
   const frameLoadHandlers = [];
   frame.addEventListener = (type, fn) => { if (type === 'load') frameLoadHandlers.push(fn); };
 
@@ -159,6 +216,12 @@ function makeRealm(opts) {
     states,
     crop: () => clip.style.getPropertyValue('--dsh-crop') || '',
     fireLoad: () => frameLoadHandlers.forEach((fn) => fn()),
+    /** 模拟拖动 VS Code 侧边栏：改 stage 宽并派发 window.resize（spec 016 AC-6）。 */
+    resize: (w) => {
+      stage.clientWidth = w;
+      sandbox.document.documentElement.clientWidth = w;
+      winListeners.filter((l) => l.type === 'resize').forEach((l) => l.fn());
+    },
     /** 模拟重置计时器：只跑当前排队的定时器。 */
     runTimers: () => { for (const t of timers.splice(0)) { try { t.fn(); } catch (e) { console.error(e); } } },
     click: () => clickHandlers.forEach((fn) => fn({ preventDefault() {} })),
@@ -176,10 +239,18 @@ function makeRealm(opts) {
   };
 }
 
-/** 上报一次测量（`drawer` 为 dsh 0.2.2 抽屉态标志，缺省表示旧插件/非抽屉）。 */
-function report(realm, sidebarWidth, collapsed, drawer) {
+/**
+ * 上报一次测量。
+ * @param {object} realm 中继域
+ * @param {number} sidebarWidth grid 首轨道宽（DSH px）
+ * @param {boolean} collapsed 折叠态
+ * @param {boolean|undefined} drawer dsh 0.2.2+ 抽屉态标志（缺省 = 旧插件）
+ * @param {number|undefined} innerWidth 页面视口（DSH px，spec 016 用于实测 ratio；缺省 = 旧插件）
+ */
+function report(realm, sidebarWidth, collapsed, drawer, innerWidth) {
   const data = { type: 'layout', sidebarWidth, collapsed: !!collapsed };
   if (drawer !== undefined) data.drawer = drawer === true;
+  if (innerWidth !== undefined) data.innerWidth = innerWidth;
   realm.fromPlugin(data);
 }
 
@@ -397,7 +468,9 @@ function report(realm, sidebarWidth, collapsed, drawer) {
     r.click();
     const toggles = () => r.frameMessages.filter((m) => m.payload && m.payload.type === 'layout-toggle');
     ok(toggles().length === 1 && toggles()[0].payload.source === 'dsh-vscode-host', 'AC-3 点按钮 → 向 iframe 发 layout-toggle');
-    ok(r.toHost.filter((m) => m.type === 'dsh-sidebar-state').length === 0, 'AC-3 抽屉态不写手动覆盖');
+    const st10 = r.toHost.filter((m) => m.type === 'dsh-sidebar-state');
+    ok(st10.length === 1 && st10[0].hidden === false && st10[0].reason === 'user',
+      'AC-3 抽屉态点「显示」同时写覆盖 hidden=false（017 修订）');
     ok(r.crop() === '0px', 'AC-3 转调不改变裁剪量');
     r.fromHost({ type: 'dsh-sidebar-toggle' });
     ok(toggles().length === 2, 'AC-3 宿主命令 dsh-sidebar-toggle 同样转调');
@@ -501,6 +574,520 @@ function report(realm, sidebarWidth, collapsed, drawer) {
     ok(statusBarMessages.length === 2, '非法 reason 整条丢弃');
   }
 
+  console.log('[13] 插件诊断日志、innerWidth 上报与翻转风暴取证（016 AC-1/AC-2/AC-4）');
+  {
+    const src = clientSource();
+
+    // AC-1：环形日志形状、关键字段与上限。
+    const env = makePluginEnv({ width: 280, collapsed: false, grid: '280px 400px 400px', innerWidth: 1000 });
+    vm.runInContext(src, env.sandbox, { filename: 'dsh-vscode-layout-client.js' });
+    env.apply(); env.ack(); env.flush();
+    const api = env.sandbox.window.__dshVscodeLayout;
+    ok(api && typeof api.logs === 'function' && typeof api.clear === 'function' && typeof api.diag === 'function',
+      'AC-1 暴露 __dshVscodeLayout.{logs,clear,diag} 排障 API');
+    let logs = api.logs();
+    ok(logs.length >= 1 && logs.every((e) => e && typeof e.t === 'number'
+      && /^[a-z-]{1,24}$/.test(String(e.ev)) && typeof e.v === 'string' && e.v.length <= 160),
+      'AC-1 日志条目形状 {t, ev, v} 合规（ev 短枚举、v≤160）');
+    ok(logs.some((e) => e.ev === 'report' && e.v.indexOf('iw=1000') >= 0), 'AC-1 上报日志含 innerWidth');
+    ok(logs.some((e) => e.ev === 'ack'), 'AC-1 握手留痕');
+    for (let i = 0; i < 150; i++) {
+      const w = 280 + (i % 40);
+      env.setWidth(w);              // 侧栏矩形
+      env.setGrid(w + 'px 400px 400px'); // 首轨道（016 起测量优先取它）
+      env.flush();
+    }
+    logs = api.logs();
+    ok(logs.length === 120, 'AC-1 环形上限 120 条、超限丢最旧（实得 ' + logs.length + '）');
+    api.clear();
+    ok(api.logs().length === 0, 'AC-1 clear() 清空');
+    env.dispose();
+
+    // AC-4：layout 上报携带 innerWidth。
+    const env2 = makePluginEnv({ width: 56, collapsed: true, grid: '56px 400px 400px', innerWidth: 1024 });
+    vm.runInContext(src, env2.sandbox, { filename: 'dsh-vscode-layout-client.js' });
+    env2.apply(); env2.ack(); env2.flush();
+    const rep = layouts(env2)[layouts(env2).length - 1];
+    ok(rep && rep.innerWidth === 1024, 'AC-4 layout 上报携带 innerWidth=1024');
+    env2.dispose();
+
+    // AC-2：1s 内 7 次 band 翻转 → 自动 layout-diag；10s 限流；未握手不介入；宿主要日志可回。
+    const env3 = makePluginEnv({ width: 56, collapsed: true, grid: '56px 400px 400px', innerWidth: 900 });
+    vm.runInContext(src, env3.sandbox, { filename: 'dsh-vscode-layout-client.js' });
+    env3.apply(); env3.ack(); env3.flush();
+    const diags3 = () => env3.reports.filter((m) => m.type === 'layout-diag');
+    ok(diags3().length === 0, 'AC-2 未翻转风暴时不发诊断');
+    for (let i = 0; i < 7; i++) {
+      env3.advance(100);
+      env3.setCollapsed(i % 2 === 1);
+      env3.setDrawer(i >= 4);
+      env3.flush();
+    }
+    ok(diags3().length === 1 && diags3()[0].reason === 'flip-storm', 'AC-2 1s 内 7 次 band 翻转 → 自动发 layout-diag(flip-storm)');
+    const d0 = diags3()[0];
+    ok(Array.isArray(d0.entries) && d0.entries.length >= 7 && d0.entries.length <= 200
+      && d0.entries.every((e) => e && typeof e.t === 'number'
+        && /^[a-z-]{1,24}$/.test(String(e.ev)) && typeof e.v === 'string' && e.v.length <= 160),
+      'AC-2 诊断条目形状合规且带现场（' + d0.entries.length + ' 条）');
+    for (let i = 0; i < 3; i++) { env3.advance(100); env3.setCollapsed(i % 2 === 0); env3.flush(); }
+    ok(diags3().length === 1, 'AC-2 10s 限流内不重复触发');
+    env3.advance(10000);
+    for (let i = 0; i < 8; i++) { env3.advance(100); env3.setCollapsed(i % 2 === 0); env3.flush(); }
+    ok(diags3().length === 2, 'AC-2 10s 限流期外再次风暴可再报（实得 ' + diags3().length + '）');
+    env3.dispose();
+
+    const env4 = makePluginEnv({ width: 56, collapsed: true, grid: '56px 400px 400px', innerWidth: 900 });
+    vm.runInContext(src, env4.sandbox, { filename: 'dsh-vscode-layout-client.js' });
+    env4.apply();
+    for (let i = 0; i < 8; i++) { env4.advance(100); env4.setCollapsed(i % 2 === 0); env4.flush(); }
+    ok(env4.reports.filter((m) => m.type === 'layout-diag').length === 0, 'AC-2 未握手 → 不采集不取证');
+    env4.dispose();
+
+    const env5 = makePluginEnv({ width: 56, collapsed: true, grid: '56px 400px 400px', innerWidth: 900 });
+    vm.runInContext(src, env5.sandbox, { filename: 'dsh-vscode-layout-client.js' });
+    env5.apply(); env5.ack(); env5.flush();
+    env5.fromHost({ type: 'layout-diag-request' }); env5.flush();
+    const req = env5.reports.filter((m) => m.type === 'layout-diag' && m.reason === 'request');
+    ok(req.length === 1 && Array.isArray(req[0].entries), 'AC-3 宿主要日志 → 回 layout-diag(reason=request)');
+    env5.dispose();
+  }
+
+  console.log('[14] 中继：缩放实测校准（请求-应答配对、拖动不采信）');
+  {
+    const r = makeRealm({ policy: 'hide', width: 1000 });
+    report(r, 56, true, false, 1000);
+    ok(r.crop() === '56px', 'AC-4 首次上报未配对 → 按 1 裁 56');
+    const asks = () => r.frameMessages.filter((m) => m.payload && m.payload.type === 'request-layout');
+    ok(asks().length === 1, 'AC-4 未校准且需要裁剪 → 主动要一次配对样本');
+
+    // 页面收到请求后重排再报：此时 clip = 1000 + 56 = 1056，s=0.875 → iw = 1056/0.875
+    report(r, 56, true, false, 1056 / 0.875);
+    ok(r.crop() === '49px', 'AC-4 配对样本 → 采信 0.875（56×0.875=49）');
+    report(r, 280, false, false, (1000 + 49) / 0.875);
+    ok(r.crop() === '249px', 'AC-4 展开 (280+4)×0.875=249');
+
+    const r2 = makeRealm({ policy: 'hide', width: 1000 });
+    report(r2, 56, true, false, 1000);
+    report(r2, 56, true, false, (1000 + 56) / 1.25);
+    ok(r2.crop() === '70px', 'AC-4 配对样本 1.25 → 导轨 70');
+    report(r2, 280, false, false, (1000 + 70) / 1.25);
+    ok(r2.crop() === '355px', 'AC-4 展开 (280+4)×1.25=355');
+
+    // 拖动中（请求发出后舞台又变了）→ 该样本作废，仍按 1 裁
+    const drag = makeRealm({ policy: 'hide', width: 900 });
+    report(drag, 56, true, false, 900);
+    ok(drag.crop() === '56px', '拖动起点：按 1 裁 56');
+    drag.resize(1000);
+    report(drag, 56, true, false, 829); // 陈旧 iw：若采信会裁 68
+    ok(drag.crop() === '56px', 'AC-4 面板在动 → 该样本作废（仍裁 56）');
+    drag.fromHost({ type: 'dsh-sidebar-diag-request' });
+    drag.runTimers();
+    const dragDiag = drag.toHost.filter((m) => m.type === 'dsh-sidebar-diag')[0];
+    ok(dragDiag && dragDiag.host.some((e) => e.ev === 'ratio-request'), '主动校准留痕（ratio-request）');
+
+    const r3 = makeRealm({ policy: 'hide', width: 1000 });
+    report(r3, 56, true, false);
+    ok(r3.crop() === '56px', 'AC-4 缺 innerWidth（旧插件）→ ratio=1（= 015 行为）');
+    report(r3, 56, true, false, 0);
+    ok(r3.crop() === '56px', 'AC-4 innerWidth=0 → 回退');
+    report(r3, 56, true, false, NaN);
+    ok(r3.crop() === '56px', 'AC-4 innerWidth 非数 → 回退');
+    report(r3, 56, true, false, 100000);
+    ok(r3.crop() === '56px', 'AC-4 ratio 越界（<0.5）→ 回退而不是按 0.01 裁 1px');
+
+    const r4 = makeRealm({ policy: 'hide', width: 500 });
+    report(r4, 0, false, true, 500);
+    ok(r4.crop() === '0px', 'AC-4 抽屉态仍恒 0（轨道 0 不参与校准）');
+    ok(r4.frameMessages.filter((m) => m.payload && m.payload.type === 'request-layout').length === 0,
+      'AC-4 抽屉态不发校准请求');
+  }
+
+  console.log('[15] 中继：auto 策略拖动去抖（016 AC-6）');
+  {
+    const r = makeRealm({ policy: 'auto', width: 1000 });
+    report(r, 56, true, false, 1000); // ratio = 1000/1000 = 1
+    ok(r.crop() === '56px', '初始 auto（1000 < 1024）→ 裁 56');
+    r.resize(1010);
+    ok(r.crop() === '56px', '拖动中（未过断点）不改裁剪');
+    r.resize(1100);
+    ok(r.crop() === '56px', '150ms 静默期内不重算（逐帧 resize 不翻转）');
+    r.resize(1110);
+    r.runTimers();
+    ok(r.crop() === '0px', '静默后按最终宽度只翻一次（1110 ≥ 1024 → 显示 → 不裁剪）');
+    ok(r.button.getAttribute('aria-label') === '隐藏 DSH 侧栏', '按钮随最终状态同步');
+    r.resize(900);
+    report(r, 56, true, false, 900); // 与新裁剪同拍的上报（真实链路里插件会随重排再报）
+    r.runTimers();
+    ok(r.crop() === '56px', '回到窄面板 → 静默后重新隐藏（ratio 按新实测 900/900=1）');
+
+    // 手动覆盖 = `dsh.ui.dshSidebarHidden`：false 表示「用户手动显示」。
+    const o = makeRealm({ policy: 'auto', override: false, width: 1000 });
+    report(o, 56, true, false, 1000);
+    ok(o.crop() === '0px', '手动覆盖显示 → 不裁剪');
+    o.resize(500); o.runTimers();
+    ok(o.crop() === '0px' && o.button.getAttribute('aria-label') === '隐藏 DSH 侧栏',
+      'AC-6 覆盖优先：缩到窄面板也不自动隐藏');
+
+    const sh = makeRealm({ policy: 'show', width: 1200 });
+    sh.resize(500); sh.runTimers();
+    ok(sh.crop() === '0px', 'AC-6 show 策略缩放后仍零干预');
+  }
+
+  console.log('[16] 中继：诊断汇聚、导出超时兜底与 ratio 回退留痕（016 AC-2/AC-3/AC-4）');
+  {
+    const r = makeRealm({ policy: 'auto', width: 900 });
+    report(r, 56, true, false, 900);
+    r.fromPlugin({ type: 'layout-diag', reason: 'flip-storm', entries: [
+      { t: 1, ev: 'flip', v: 'n=7' },
+      { t: 2, ev: 'report', v: 'w=56 c=1 d=0 iw=900' }
+    ] });
+    const diags = r.toHost.filter((m) => m.type === 'dsh-sidebar-diag');
+    ok(diags.length === 1 && diags[0].reason === 'flip-storm', 'AC-2 收到页面诊断 → 转发扩展');
+    ok(Array.isArray(diags[0].host) && diags[0].host.length >= 1 && diags[0].host.some((e) => e.ev === 'layout'),
+      'AC-2 附带宿主自身日志（两侧时间线）');
+    ok(Array.isArray(diags[0].plugin) && diags[0].plugin.length === 2 && diags[0].pluginUnavailable === false,
+      'AC-2 页面日志原样附带、pluginUnavailable=false');
+
+    const r2 = makeRealm({ policy: 'auto', width: 900 });
+    r2.fromHost({ type: 'dsh-sidebar-diag-request' });
+    const reqs = r2.frameMessages.filter((m) => m.payload && m.payload.type === 'layout-diag-request');
+    ok(reqs.length === 1 && reqs[0].payload.source === 'dsh-vscode-host', 'AC-3 导出请求 → 向页面要日志');
+    r2.fromPlugin({ type: 'layout-diag', reason: 'request', entries: [{ t: 1, ev: 'report', v: 'w=56' }] });
+    const d2 = r2.toHost.filter((m) => m.type === 'dsh-sidebar-diag');
+    ok(d2.length === 1 && d2[0].reason === 'request' && d2[0].plugin.length === 1, 'AC-3 页面回包 → 合并上报一次');
+    r2.runTimers();
+    ok(r2.toHost.filter((m) => m.type === 'dsh-sidebar-diag').length === 1, 'AC-3 回包后超时不再补发');
+
+    const r3 = makeRealm({ policy: 'auto', width: 900 });
+    r3.fromHost({ type: 'dsh-sidebar-diag-request' });
+    r3.runTimers();
+    const d3 = r3.toHost.filter((m) => m.type === 'dsh-sidebar-diag');
+    ok(d3.length === 1 && d3[0].pluginUnavailable === true && Array.isArray(d3[0].host),
+      'AC-3 600ms 无回包（老插件）→ 兜底上报并标 pluginUnavailable');
+
+    const r4 = makeRealm({ policy: 'hide', width: 1000 });
+    report(r4, 56, true, false, 100000); // ratio 越界 → 回退并留痕
+    r4.fromHost({ type: 'dsh-sidebar-diag-request' });
+    r4.runTimers();
+    const d4 = r4.toHost.filter((m) => m.type === 'dsh-sidebar-diag')[0];
+    ok(d4 && d4.host.some((e) => e.ev === 'ratio-fallback'), 'AC-4 ratio 回退写进宿主日志（导出可见）');
+
+    // 页面日志是不可信输入：中继先按形状过滤 + 截断，扩展侧再做一道（双层校验）。
+    const r5 = makeRealm({ policy: 'auto', width: 900 });
+    r5.fromPlugin({ type: 'layout-diag', reason: 'flip-storm', entries: [
+      { t: 1, ev: 'report', v: 'x'.repeat(500) },
+      { t: 2, ev: 'BAD EV', v: 'y' },
+      { t: 3, ev: 'report', v: 'ok' }
+    ] });
+    const d5 = r5.toHost.filter((m) => m.type === 'dsh-sidebar-diag')[0];
+    ok(d5 && d5.plugin.length === 2 && d5.plugin[0].v.length <= 160 && d5.plugin[1].v === 'ok',
+      'AC-2 页面日志在中继侧就截断/丢弃（不可信输入）');
+  }
+
+  console.log('[17] 扩展宿主：diag 净化、输出面板与导出命令（016 AC-2/AC-3）');
+  {
+    outputChannels.length = 0;
+    infoMessages.length = 0;
+    const beforeStatus = statusBarMessages.length;
+
+    const norm = I.normalizeSidebarDiag({
+      reason: 'flip-storm',
+      host: [
+        { t: 10, ev: 'layout', v: 'w=56 crop=56' },
+        { t: 11, ev: 'bad ev!', v: 'x' },
+        { t: 12, ev: 'layout', v: 'a\u0007b\u0001' + 'x'.repeat(500) }
+      ],
+      plugin: 'nope',
+      pluginUnavailable: true
+    });
+    ok(norm && norm.reason === 'flip-storm' && norm.host.length === 2 && norm.plugin.length === 0
+      && norm.pluginUnavailable === true, 'AC-3 净化：形状白名单 + 非法条目丢弃 + 非数组归空');
+    ok(norm.host[1].v.indexOf('\u0007') < 0 && norm.host[1].v.length <= 160, 'AC-3 v 清洗控制字符并截断 160');
+    ok(I.normalizeSidebarDiag({ reason: 'BAD reason!', host: [] }) === null, 'AC-3 reason 不合规整条丢弃');
+    ok(I.normalizeSidebarDiag(null) === null && I.normalizeSidebarDiag('x') === null, 'AC-3 非法载荷丢弃');
+
+    I.handleWebviewMessage({ type: 'dsh-sidebar-diag', reason: 'flip-storm',
+      host: [{ t: 1, ev: 'layout', v: 'w=56' }], plugin: [{ t: 2, ev: 'report', v: 'w=56' }] }, null);
+    const ch = outputChannels[outputChannels.length - 1];
+    ok(ch && ch.name === 'DeepSeek Harness' && ch.lines.some((l) => l.indexOf('flip-storm') >= 0)
+      && ch.lines.some((l) => l.indexOf('[宿主]') >= 0) && ch.lines.some((l) => l.indexOf('[页面]') >= 0),
+      'AC-2 诊断写入输出面板（含原因与两侧日志）');
+    ok(statusBarMessages.length === beforeStatus + 1 && /抖动/.test(statusBarMessages[beforeStatus].text)
+      && /导出/.test(statusBarMessages[beforeStatus].text), 'AC-2 状态栏一次提示（含导出命令出口）');
+    I.handleWebviewMessage({ type: 'dsh-sidebar-diag', reason: 'flip-storm', host: [], plugin: [] }, null);
+    ok(statusBarMessages.length === beforeStatus + 1, 'AC-2 重复风暴不刷屏');
+    ok(ch.lines.length > 3, 'AC-2 但每次都落日志（可反复取证）');
+
+    I.diagnoseSidebarCmd();
+    ok(infoMessages.length === 1 && /面板尚未打开/.test(infoMessages[0]), 'AC-3 面板未打开 → 中文信息提示（出口明确）');
+    const beforeLines = ch.lines.length;
+    I.writeSidebarDiagMissing();
+    ok(ch.lines.length > beforeLines && ch.lines.some((l) => l.indexOf('未收到页面回包') >= 0),
+      'AC-3 无回包兜底写入说明（不静默）');
+
+    const pkg = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'package.json'), 'utf8'));
+    ok((pkg.contributes.commands || []).some((c) => c.command === 'dshPanel.diagnoseSidebar'),
+      'AC-3 命令已入 package.json 贡献点');
+  }
+
+  console.log('[18] 收敛扫描 × 4 档缩放比例（016 AC-5）');
+  {
+    const src = clientSource();
+    ok(expectedCrop(1000, 1.25) === 70 && expectedCrop(600, 0.75) === 42,
+      'AC-5 期望值含缩放（s≠1 时不同于未校准的 56 → 旧公式在本扫描必红）');
+    const failures = [];
+    const mismatch = [];
+    for (const s of [0.75, 0.875, 1, 1.25]) {
+      for (let stage = 240; stage <= 1400; stage += 8) {
+        const rr = runCropLoop(stage, src, s);
+        if (!rr.ok) failures.push('s=' + s + ' stage=' + stage + ' ' + rr.detail);
+        const want = expectedCrop(stage, s);
+        if (rr.crop !== want) mismatch.push('s=' + s + ' stage=' + stage + ' → ' + rr.crop + '≠' + want);
+      }
+    }
+    ok(failures.length === 0, '四档缩放 × 240–1400 收敛且无 2-周期（首个：' + (failures[0] || '无') + '）');
+    ok(mismatch.length === 0, '收敛值 = round(轨道 × s) 分段（首个：' + (mismatch[0] || '无') + '）');
+  }
+
+  console.log('[19] 抽屉态手动显隐跨断点保持（spec 017）');
+  {
+    // 窄面板（<768）抽屉态：用户点「显示」（打开抽屉），意图必须落到宿主覆盖。
+    const r = makeRealm({ policy: 'auto', width: 500 });
+    report(r, 0, true, true, 500);
+    ok(r.crop() === '0px' && r.button.getAttribute('aria-label') === '显示 DSH 侧栏',
+      '抽屉收起：不裁剪 + 按钮「显示」');
+    r.click();
+    const st = r.toHost.filter((m) => m.type === 'dsh-sidebar-state');
+    ok(st.length === 1 && st[0].hidden === false && st[0].reason === 'user',
+      'AC-1 点「显示」→ 写覆盖 hidden=false（否则拉宽后会被 auto 藏回去）');
+    report(r, 0, false, true, 500);
+    ok(r.button.getAttribute('aria-label') === '隐藏 DSH 侧栏', '抽屉已展开 → 按钮「隐藏」');
+
+    // 拉宽到 768–1024（grid 导轨，auto 本会隐藏）
+    r.resize(900);
+    report(r, 56, true, false, 900);
+    r.runTimers();
+    ok(r.crop() === '0px', 'AC-1 拉宽到 900 → 仍按「显示」：不裁剪');
+    ok(r.button.getAttribute('aria-label') === '隐藏 DSH 侧栏', 'AC-1 按钮仍为「隐藏」');
+
+    // 继续拉宽到 ≥1024
+    r.resize(1200);
+    r.runTimers();
+    ok(r.crop() === '0px', 'AC-4 拉宽到 1200（去抖触发）→ 覆盖优先，仍不裁剪');
+
+    // 再拉回抽屉态：裁剪仍 0，展示态回到 collapsed 驱动
+    r.resize(500);
+    report(r, 0, true, true, 500);
+    r.runTimers();
+    ok(r.crop() === '0px' && r.button.getAttribute('aria-label') === '显示 DSH 侧栏',
+      'AC-5 拉回抽屉态：crop 仍 0、按钮回到「显示」（抽屉态展示按 collapsed）');
+
+    // 反向：抽屉已展开时点「隐藏」→ 覆盖 true → 拉宽后按用户意图隐藏。
+    const r2 = makeRealm({ policy: 'auto', width: 500 });
+    report(r2, 0, false, true, 500);
+    ok(r2.button.getAttribute('aria-label') === '隐藏 DSH 侧栏', '抽屉已展开 → 按钮「隐藏」');
+    r2.click();
+    const st2 = r2.toHost.filter((m) => m.type === 'dsh-sidebar-state');
+    ok(st2.length === 1 && st2[0].hidden === true, 'AC-2 点「隐藏」→ 写覆盖 hidden=true');
+    r2.resize(900);
+    report(r2, 56, true, false, 900);
+    r2.runTimers();
+    ok(r2.crop() === '56px', 'AC-2 拉宽到 900 → 按用户意图隐藏（裁 56）');
+
+    // 同源缺陷（grid 态）：手动显示后拖动面板，auto 重算不得把选择冲掉。
+    const r3 = makeRealm({ policy: 'auto', width: 900 });
+    report(r3, 56, true, false, 900);
+    ok(r3.crop() === '56px', 'grid 态 auto（900）→ 已隐藏');
+    r3.click();
+    ok(r3.crop() === '0px', '手动显示 → 立即不裁剪');
+    r3.resize(1000);
+    report(r3, 56, true, false, 1000);
+    r3.runTimers();
+    ok(r3.crop() === '0px', 'AC-6 拖动/缩放后仍按手动选择显示（不被 auto 重算冲掉）');
+
+    // 取证指纹：导出日志里应能看到「用户覆盖已写」且拉宽后的重算没有翻转（spec 017 的排障依据）。
+    r3.fromHost({ type: 'dsh-sidebar-diag-request' });
+    r3.runTimers();
+    const dg = r3.toHost.filter((m) => m.type === 'dsh-sidebar-diag')[0];
+    ok(dg && dg.host.some((e) => e.ev === 'hidden' && /hidden=0/.test(e.v) && /ovr=0/.test(e.v)),
+      '诊断日志含「手动覆盖已写」的指纹（hidden=0 ovr=0）');
+    ok(dg && dg.host.some((e) => e.ev === 'resize' && /skipped=1/.test(e.v) && /ovr=0/.test(e.v)),
+      '诊断日志显示拉宽被覆盖接管（auto 不再介入，不会翻回隐藏）');
+  }
+
+  console.log('[20] 调试日志落盘（spec 018：默认关闭、脱敏、轮转、失败不打断）');
+  {
+    const logPath = I.debugLogPath();
+
+    // 默认关闭：不建文件、不写内容
+    delete config['dshPanel.debugLogToFile'];
+    I.resetDebugLogState();
+    ok(I.debugLogEnabled() === false, '默认关闭：debugLogEnabled()=false');
+    I.debugLog('test', 'should-not-be-written');
+    ok(fs.existsSync(logPath) === false, '默认关闭：不创建日志文件');
+
+    const pkg = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'package.json'), 'utf8'));
+    const opt = pkg.contributes.configuration.properties['dshPanel.debugLogToFile'];
+    ok(opt && opt.type === 'boolean' && opt.default === false, '配置项 dshPanel.debugLogToFile 存在且默认 false');
+    ok((pkg.contributes.commands || []).some((c) => c.command === 'dshPanel.openDebugLog'),
+      '命令「打开调试日志」已入贡献点');
+
+    // 开启：诊断包落盘 + 首次提示路径
+    config['dshPanel.debugLogToFile'] = true;
+    I.resetDebugLogState();
+    const beforeStatus = statusBarMessages.length;
+    I.handleWebviewMessage({ type: 'dsh-sidebar-diag', reason: 'flip-storm',
+      host: [{ t: 1, ev: 'layout', v: 'w=56 crop=56' }],
+      plugin: [{ t: 2, ev: 'report', v: 'w=56' }] }, null);
+    ok(fs.existsSync(logPath) === true, '开启后生成日志文件');
+    const text1 = fs.readFileSync(logPath, 'utf8');
+    ok(text1.indexOf('[sidebar-diag]') >= 0 && text1.indexOf('原因=flip-storm') >= 0
+      && text1.indexOf('w=56 crop=56') >= 0, '诊断包落盘（原因 + 两侧条目）');
+    ok(statusBarMessages.length === beforeStatus + 1
+      && /调试日志已开启/.test(statusBarMessages[beforeStatus].text)
+      && statusBarMessages[beforeStatus].text.indexOf(logPath) >= 0, '首次写入提示一次（含文件路径）');
+
+    // 脱敏：token 值不得落盘
+    I.handleWebviewMessage({ type: 'dsh-sidebar-diag', reason: 'request',
+      host: [{ t: 3, ev: 'layout', v: 'url=/api?token=SECRET123' }], plugin: [] }, null);
+    const text2 = fs.readFileSync(logPath, 'utf8');
+    ok(text2.indexOf('SECRET123') < 0 && text2.indexOf('token=***') >= 0, '落盘前脱敏：token 值不写入');
+
+    // 手动切换留档
+    I.handleWebviewMessage({ type: 'dsh-sidebar-state', hidden: true, reason: 'user' }, null);
+    ok(fs.readFileSync(logPath, 'utf8').indexOf('[sidebar-state]') >= 0, '手动显示/隐藏事件落盘');
+
+    // 轮转：单条超过 2MB → 旧文件改名 .log.1，新文件继续写
+    const backup = logPath + '.1';
+    try { fs.unlinkSync(backup); } catch (e) { /* 无旧备份 */ }
+    I.debugLog('test', 'x'.repeat(2 * 1024 * 1024 + 64));
+    ok(fs.existsSync(backup) === true, '超过 2MB 自动轮转为 .log.1');
+    ok(fs.statSync(logPath).size > 0, '轮转后继续写新文件');
+
+    // 命令：存在则打开；不存在给开启指引
+    I.openDebugLog();
+    ok(shownDocs.length === 1 && shownDocs[0].fsPath === logPath, '命令「打开调试日志」打开该文件');
+    const infoBefore = infoMessages.length;
+    try { fs.unlinkSync(logPath); } catch (e) { /* ignore */ }
+    I.openDebugLog();
+    ok(infoMessages.length === infoBefore + 1 && /尚未生成/.test(infoMessages[infoBefore]),
+      '日志不存在 → 指引开启设置（不静默）');
+
+    // IO 失败不影响功能：HOME 指向「.dsh-debug 是普通文件」的目录
+    const brokenHome = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-broken-'));
+    fs.writeFileSync(path.join(brokenHome, '.dsh-debug'), 'not-a-dir');
+    process.env.HOME = brokenHome;
+    I.resetDebugLogState();
+    const stBefore = statusBarMessages.length;
+    I.debugLog('test', 'boom');
+    ok(statusBarMessages.length === stBefore + 1 && /调试日志写入失败/.test(statusBarMessages[stBefore].text),
+      '落盘失败 → 状态栏提示一次（不打断功能）');
+    const chBefore = outputChannels[outputChannels.length - 1].lines.length;
+    I.handleWebviewMessage({ type: 'dsh-sidebar-diag', reason: 'manual',
+      host: [{ t: 1, ev: 'layout', v: 'w=1' }], plugin: [] }, null);
+    ok(outputChannels[outputChannels.length - 1].lines.length > chBefore, '落盘失败时输出面板照常可写');
+    process.env.HOME = profileRoot;
+    I.resetDebugLogState();
+    delete config['dshPanel.debugLogToFile'];
+  }
+
+  console.log('[21] 事件流自动落盘（spec 019：关闭零成本、开启批量、热切换）');
+  {
+    const logPath = I.debugLogPath();
+
+    // 关闭：完全不产生事件流消息（关闭时热路径只多一次布尔判断）
+    delete config['dshPanel.debugLogToFile'];
+    I.resetDebugLogState();
+    const off = makeRealm({ policy: 'hide', width: 900, debug: false });
+    report(off, 56, true, false, 900);
+    off.resize(1000);
+    report(off, 56, true, false, 1000);
+    off.runTimers();
+    ok(off.toHost.filter((m) => m.type === 'dsh-sidebar-trace').length === 0,
+      '关闭：不产生事件流消息（零 IO / 零定时器）');
+
+    // 开启：批量推送 → 扩展一次追加
+    config['dshPanel.debugLogToFile'] = true;
+    I.resetDebugLogState();
+    try { fs.unlinkSync(logPath); } catch (e) { /* 首次 */ }
+    const on = makeRealm({ policy: 'hide', width: 900, debug: true });
+    report(on, 56, true, false, 900);
+    on.resize(1000);
+    report(on, 56, true, false, 1000);
+    on.runTimers();
+    const traces = on.toHost.filter((m) => m.type === 'dsh-sidebar-trace');
+    ok(traces.length >= 1 && Array.isArray(traces[0].entries)
+      && traces[0].entries.some((e) => e.ev === 'layout'), '开启：按批推送事件流（含 layout 现场）');
+    for (const t of traces) I.handleWebviewMessage(t, null);
+    const fileText = fs.readFileSync(logPath, 'utf8');
+    ok(fileText.indexOf('[sidebar-trace]') >= 0 && fileText.indexOf('layout w=56') >= 0,
+      '事件流写入文件（不必再手动导出诊断）');
+
+    // 单包上限 200（攒满立即发，避免积压）
+    const many = makeRealm({ policy: 'hide', width: 900, debug: true });
+    report(many, 56, true, false, 900);
+    for (let i = 0; i < 210; i++) {
+      many.resize(900 + i);
+      report(many, 56 + (i % 3), true, false, 900 + i);
+    }
+    const mt = many.toHost.filter((m) => m.type === 'dsh-sidebar-trace');
+    ok(mt.length >= 1 && mt[0].entries.length === 200, '单包条目上限 200（满即发）');
+
+    // 热切换：开启→推送；关闭→停止
+    const hot = makeRealm({ policy: 'hide', width: 900, debug: false });
+    hot.fromHost({ type: 'dsh-debug-log-file', enabled: true });
+    report(hot, 56, true, false, 900);
+    hot.runTimers();
+    ok(hot.toHost.filter((m) => m.type === 'dsh-sidebar-trace').length >= 1, '热开启：开始推送事件流');
+    hot.fromHost({ type: 'dsh-debug-log-file', enabled: false });
+    const before = hot.toHost.filter((m) => m.type === 'dsh-sidebar-trace').length;
+    report(hot, 60, true, false, 900);
+    hot.runTimers();
+    ok(hot.toHost.filter((m) => m.type === 'dsh-sidebar-trace').length === before, '热关闭：不再推送');
+
+    // 净化：事件流与诊断包同一套白名单
+    const bad = I.normalizeDiagEntries([
+      { t: 1, ev: 'layout', v: 'ok' },
+      { t: 'x', ev: 'layout', v: 'no' },
+      { t: 2, ev: 'BAD EV', v: 'no' }
+    ]);
+    ok(bad.length === 1 && bad[0].v === 'ok', '事件流条目走同一套白名单净化');
+
+    // 开启时写入环境行（缩放/字号是复盘错位的必要条件）
+    try { fs.unlinkSync(logPath); } catch (e) { /* 可能不存在 */ }
+    I.resetDebugLogState();
+    I.onDebugLogSettingChanged();
+    const envText = fs.readFileSync(logPath, 'utf8');
+    ok(/\[env\].*zoomLevel/.test(envText) && /fontScale=/.test(envText), '开启时写入环境行（zoomLevel/字号）');
+    config['dshPanel.debugLogToFile'] = false;
+    I.onDebugLogSettingChanged();
+    delete config['dshPanel.debugLogToFile'];
+  }
+
+  console.log('[22] 日志位置：扩展 globalStorage + 旧日志迁移（spec 021）');
+  {
+    ok(I.debugLogDirFrom({ globalStorageUri: { fsPath: '/tmp/gs' } }) === path.join('/tmp/gs', 'logs'),
+      '优先用扩展的 globalStorage/logs');
+    ok(I.debugLogDirFrom(null) === path.join(os.homedir(), '.dsh-debug'), '无上下文 → 回退 ~/.dsh-debug');
+    ok(I.debugLogDirFrom({ globalStorageUri: { fsPath: '' } }) === path.join(os.homedir(), '.dsh-debug'),
+      '空 fsPath → 回退');
+    ok(I.debugLogPathFor('/tmp/gs/logs') === path.join('/tmp/gs/logs', I.debugLogFileName()),
+      '纯函数调试日志路径拼接');
+
+    const migrationHome = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-mig-'));
+    const legacyDir = path.join(migrationHome, '.dsh-debug');
+    fs.mkdirSync(legacyDir, { recursive: true });
+    fs.writeFileSync(path.join(legacyDir, I.debugLogFileName()), 'legacy-line-1\n');
+    const target = path.join(migrationHome, 'globalStorage', 'logs', I.debugLogFileName());
+    const savedHome = process.env.HOME;
+    process.env.HOME = migrationHome;
+    ok(I.migrateLegacyDebugLog(target) === true, '首次把旧位置日志迁移到新位置');
+    ok(fs.readFileSync(target, 'utf8').indexOf('legacy-line-1') >= 0, '迁移内容完整');
+    ok(I.migrateLegacyDebugLog(target) === false, '目标已存在 → 不重复迁移、不覆盖');
+    process.env.HOME = savedHome;
+    fs.rmSync(migrationHome, { recursive: true, force: true });
+  }
+
   console.log('\n全部通过：' + passed + ' 项断言 ✓');
   process.exit(0);
 })().catch((e) => {
@@ -524,6 +1111,10 @@ function makePluginEnv(opts) {
   const clickListeners = [];
   // 仿真的 computed style：grid-template-columns（spec 015 轨道优先测量的输入）。
   let grid = o.grid === undefined ? '' : String(o.grid);
+  // 假时钟（spec 016 风暴窗口 1s / 限流 10s 可离线驱动）。
+  const clock = { t: 1700000000000 };
+  // 页面视口（DSH px）：spec 016 上报 innerWidth、宿主据此算实测 ratio。
+  let innerWidth = o.innerWidth === undefined ? 1000 : o.innerWidth;
   let seq = 1;
   let disposed = false;
 
@@ -582,6 +1173,9 @@ function makePluginEnv(opts) {
   };
   sandbox.window.document = sandbox.document;
   sandbox.window.__ModuleLoader__ = sandbox.__ModuleLoader__;
+  // spec 016：页面视口（上报 innerWidth）与假时钟（风暴窗口/限流）。
+  sandbox.window.innerWidth = innerWidth;
+  sandbox.Date = { now: () => clock.t };
   vm.createContext(sandbox);
 
   let disposer = null;
@@ -620,6 +1214,8 @@ function makePluginEnv(opts) {
     setCollapsed: (v) => { frame.attrs['data-sidebar-collapsed'] = v ? '' : null; },
     setDrawer: (v) => { frame.attrs['data-sidebar-drawer'] = v ? '' : null; },
     setGrid: (v) => { grid = v === undefined ? '' : String(v); },
+    setInnerWidth: (v) => { innerWidth = v; sandbox.window.innerWidth = v; },
+    advance: (ms) => { clock.t += ms; },
     flush,
     dispose: () => {
       disposed = true;
@@ -673,16 +1269,19 @@ function drainReports(env, realm) {
 }
 
 /**
- * 固定点迭代（spec 015 AC-6）：`视口 = 面板宽 + crop` → dsh 布局模型 → 真实插件测量 →
- * 真实中继裁剪。连续两次 crop 相同即收敛；中途出现重复值 = 2-周期振荡（004 §12 的失败模式）。
- * @param {number} stage 面板（stage）宽
+ * 固定点迭代（spec 015 AC-6 / 016 AC-5）：`视口(DSH px) = (面板宽 + crop) / s` →
+ * dsh 布局模型 → 真实插件测量（含 innerWidth 同拍上报）→ 真实中继按实测 ratio 裁剪。
+ * 连续两次 crop 相同即收敛；中途出现重复值 = 2-周期振荡。
+ * @param {number} stage 面板（stage）宽（webview px）
  * @param {string} pluginSource 插件源码
+ * @param {number} [s] 缩放比例（CSS zoom：1 DSH px = s 个 webview px）
  * @returns {{ok: boolean, crop: number, detail: string}}
  */
-function runCropLoop(stage, pluginSource) {
-  const realm = makeRealm({ policy: 'auto', width: stage });
+function runCropLoop(stage, pluginSource, s = 1) {
+  const realm = makeRealm({ policy: 'auto', width: stage, scale: s });
   const env = makePluginEnv({ width: 0, collapsed: false, grid: '0px 400px 400px', drawer: true });
   vm.runInContext(pluginSource, env.sandbox, { filename: 'dsh-vscode-layout-client.js' });
+  env.setInnerWidth(stage / s); // 首拍：面板宽 / s（与 crop=0 同拍）
   env.apply();
   env.ack();
   env.flush();
@@ -690,15 +1289,27 @@ function runCropLoop(stage, pluginSource) {
 
   const seen = Object.create(null);
   const seq = [];
+  let frameCursor = 0;
   let prev = cropPx(realm);
   seen[prev] = true;
   for (let i = 0; i < 40; i++) {
-    const viewport = stage + cropPx(realm);
+    const viewport = (stage + cropPx(realm)) / s;
     const st = dshLayoutModel(viewport);
     env.setDrawer(st.drawer);
     env.setCollapsed(st.collapsed);
     env.setWidth(st.drawer ? st.overlay : st.track);
     env.setGrid(st.track + 'px 400px 400px');
+    env.setInnerWidth(viewport); // 与本次几何同拍（真实链路里 innerWidth 与轨道同一次上报）
+    env.flush();
+    drainReports(env, realm);
+    // 宿主做缩放校准时会要一次配对样本：把请求派发给页面，页面按当前几何立即回报（spec 020）。
+    while (frameCursor < realm.frameMessages.length) {
+      const payload = realm.frameMessages[frameCursor++].payload;
+      if (!payload || payload.source !== 'dsh-vscode-host') continue;
+      // 真实链路：裁剪已应用 → iframe 宽度变了 → 浏览器让页面重新布局后才应答请求。
+      if (payload.type === 'request-layout') env.setInnerWidth((stage + cropPx(realm)) / s);
+      env.fromHost(payload);
+    }
     env.flush();
     drainReports(env, realm);
     const c = cropPx(realm);
@@ -709,4 +1320,21 @@ function runCropLoop(stage, pluginSource) {
     prev = c;
   }
   return { ok: false, crop: cropPx(realm), detail: '40 次内不收敛 crop=' + seq.join('→') };
+}
+
+/**
+ * spec 016 AC-5 的分段期望（policy=auto、zoom=s、narrowExpanded=false）：
+ *  - stage ≥ 1024：auto 判定为宽面板 → 不裁剪；
+ *  - stage < 768s：DSH 视口 < 768 → 抽屉态轨道 0 → 不裁剪；
+ *  - [768s, 968s)：导轨 56 → round(56s)；
+ *  - ≥ 968s：视口将跨 1024 → 展开 (280+4) → round(284s)。
+ * @param {number} stage 面板宽（webview px）
+ * @param {number} s 缩放比例
+ * @returns {number} 期望裁剪量（webview px）
+ */
+function expectedCrop(stage, s) {
+  if (stage >= 1024) return 0;
+  if (stage < 768 * s) return 0;
+  if (stage < 968 * s) return Math.round(56 * s);
+  return Math.round(284 * s);
 }

@@ -47,7 +47,7 @@ dsh 布局（0.2.2 抽屉态） → dsh-vscode-layout（轨道优先测量 + dra
 
 | 状态 | 位置 | 谁置位 | 谁清理 | 失效策略 |
 | --- | --- | --- | --- | --- |
-| `measured.drawer` | webview 内存 | 收到带 `drawer` 的 `layout` 上报时整体替换 `measured` | 新上报覆盖；面板重载即失 | 无持久化（抽屉态本就不写覆盖） |
+| `measured.drawer` | webview 内存 | 收到带 `drawer` 的 `layout` 上报时整体替换 `measured` | 新上报覆盖；面板重载即失 | 抽屉态点按钮也会写覆盖（017 修订） |
 | 手动覆盖 `dsh.ui.dshSidebarHidden` | `globalState` | **仅 grid 态**按钮/命令（既有路径） | 配置变更 `applySidebarPolicyChange`（既有） | 抽屉态不写 → 不产生跨态残留 |
 | `sidebarToggleFailedNotified` | webview 宿主内存（`extension.js` 模块级） | 首次 `dsh-sidebar-toggle-failed` | 面板/窗口重建 | 每窗口一次，防刷屏 |
 
