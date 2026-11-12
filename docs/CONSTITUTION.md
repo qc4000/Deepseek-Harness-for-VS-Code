@@ -12,7 +12,9 @@
 
 **原则**：面板必须忠实呈现 DSH Web GUI。不得向 DSH 页面注入脚本、改写 DOM、劫持快捷键或
 拦截交互——唯一例外是随包分发、默认开启但可关闭的内置插件，且它们必须遵守「只读监听 +
-握手后生效 + 失败回放原行为」。
+握手后生效 + 失败回放原行为」。**为了插件的易用性，内置插件可以调用 DSH 公开的客户端服务
+（如 `uiWorkspace.openWorkspace`、`layout.toggleSidebar`）来响应用户操作；但不得改 DOM。**
+其他要求不变。
 
 **为什么**：用户（包括 DSH 二次开发者）会自行组织页面、装配第三方插件。任何隐式改写都会与
 他们的定制打架，且难以排障。`dsh-webview-clipboard` / `dsh-vscode-file-links` 之所以可接受，
@@ -21,6 +23,9 @@
 **可验证约束**：
 - 页面内注入的最小单元是「一个 `postMessage` 协议 + 只读事件监听」；新增 DOM 写入视为破坏，
   必须走宪法修订。
+- 内置插件对 DSH 的写操作**只能**经由其公开客户端服务（`ctx.*` 上的既有 API）完成，且必须由
+  用户显式触发（点按钮 / 执行命令）；同样要「未握手惰性 + 能力可关 + 失败可见」，并有回归测试。
+  除这类服务调用外，仍不得改 DOM、拦截 DSH 自身交互或写 DSH 存储。
 - 插件能力必须能通过配置关闭（如 `dshPanel.workspaceFileLinkAction=off`、`installClipboardPlugin=false`），
   关闭后行为与该特性不存在时完全一致。
 - 有对应回归测试证明「非内嵌场景不介入」（如 `test/file-link-client-sim.test.js`、
