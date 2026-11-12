@@ -2,6 +2,40 @@
 
 本项目遵循 [语义化版本](https://semver.org/lang/zh-CN/)。完整提交历史见 [GitHub](https://github.com/Vithrive/Deepseek-Harness-for-VS-Code/commits/main)。
 
+## 1.1.1
+
+**侧栏裁剪（修复，需重启 dsh web）**
+
+- **窄面板里的侧栏裁剪不再切对话区、不再来回闪**：dsh 0.2.2 起 `<768px` 是抽屉态
+  （侧栏变浮层、grid 首轨 0、收起只 `translate(-100%)`）。旧口径按「侧栏矩形宽」裁剪会在抽屉态
+  切掉对话区左侧，并让裁剪量反过来改变 DSH 视口、跨 768 断点形成 2-周期振荡（实测 488–711px 持续闪烁）。
+  现在：抽屉态恒不裁剪，顶部按钮/命令改为转调 DSH 原生 `ctx.layout.toggleSidebar()`；
+  测量口径改为 frame 的 grid 首轨道（导轨 56 / 展开 264–420 / 抽屉 0），不可解析才回退矩形。
+- **手动「显示/隐藏」在拉宽/拖动后保持**：此前页面内的覆盖态只在构建时注入，手动选择会被下一次
+  resize 的 auto 重算冲掉（抽屉态拉宽必现）；现在手动切换会同步覆盖态，抽屉态点击也写入覆盖。
+- **缩放比例改为实测配对**：`crop = round((轨道+余量) × 实测比例)`，比例只在 `request-layout`
+  应答且面板宽未变时采信（拖动中的自发上报作废），字号变化重校；量不到/越界回退 1。
+  修掉非 1 倍字号下的残留侧栏条/多切内容，以及拖动期的假比例（实机日志曾出现 0.88–1.35）。
+- auto 策略的隐藏重算改为 150ms 尾沿去抖（拖动跨 1024 断点只翻一次）。
+- 配套插件 `dsh-vscode-layout` 0.1.1 → 0.3.0；装包后请点面板顶部「重启 dsh web」生效。
+
+**侧栏诊断（新增；落盘默认关闭）**
+
+- 新增命令「DeepSeek Harness: 导出 DSH 侧栏诊断」：页面侧 + 面板侧两侧时间线写入输出面板
+  「DeepSeek Harness」（含 `ratio/rect/clip`、`ovr/skipped`、窗口缩放与字号）；抖动风暴
+  （1 秒内折叠/抽屉态翻转 ≥7 次）自动取证并在状态栏提示一次。
+- 新增设置 `dshPanel.debugLogToFile`（默认 `false`）：把同一份诊断与事件流
+  （`layout/recompute/hidden/resize` 等；1 秒一包、单包 ≤200 条）追加到扩展的全局存储目录
+  `<globalStorage>/logs/dsh-vscode-debug.log`，超过 2MB 轮转为 `.log.1`；写前脱敏
+  （不含 token/对话内容）；从旧版本升级会把 `~/.dsh-debug` 的历史日志复制一次。
+  **关闭时零额外开销**（不建队列、不起定时器、不发消息）。
+  命令「DeepSeek Harness: 打开调试日志」直接打开该文件。
+- 规格：[015](docs/sdd/specs/015-drawer-sidebar-crop/spec.md)、[016](docs/sdd/specs/016-sidebar-flicker-diagnostics/spec.md)、
+  [017](docs/sdd/specs/017-drawer-manual-override/spec.md)、[018](docs/sdd/specs/018-debug-log-file/spec.md)、
+  [019](docs/sdd/specs/019-trace-auto-file/spec.md)、[020](docs/sdd/specs/020-ratio-pairing/spec.md)、
+  [021](docs/sdd/specs/021-debug-log-location/spec.md)。
+- 测试：`dsh-sidebar` 61 → 196；`npm test` 22 套 / 1258 项断言全绿。
+
 ## 1.1.0
 
 **外部链接（新增）**
