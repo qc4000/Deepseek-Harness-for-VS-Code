@@ -5725,51 +5725,102 @@ async function dshRpc(base, method, payload, timeoutMs) {
 }
 
 /**
+ * 从 dsh 的「游标越界」报错里解析当前游标。
+ * 两代文案：
+ * - 0.1.2-rc.x ~ 0.2.1：`past cursor N`（N 即当前游标）；
+ * - 0.2.2+：`session history cut N exceeds M`（N 是请求值、M 才是当前游标）。
+ * @param {string} message 错误文案
+ * @returns {number|null} 解析到返回游标，否则 null
+ */
+function sessionCursorFromError(message) {
+  const s = String(message || '');
+  const legacy = /past cursor (-?\d+)/.exec(s);
+  if (legacy) return Number.parseInt(legacy[1], 10);
+  const current = /session history cut (-?\d+) exceeds (-?\d+)/.exec(s);
+  if (current) return Number.parseInt(current[2], 10);
+  return null;
+}
+
+/** 历史拉取路径留痕（同一会话同一路径只写一次，避免轮询把日志刷满）。 */
+const historyPathSeen = new Map();
+/**
+ * @param {string} sid 会话 id
+ * @param {string} route 走了哪条路径（page-tail / page-probe / empty / legacy）
+ * @param {string} [detail] 附带信息（游标、条数、错误）
+ */
+function noteHistoryPath(sid, route, detail) {
+  const key = String(sid || '');
+  if (historyPathSeen.get(key) === route) return;
+  if (historyPathSeen.size > 64) historyPathSeen.clear();
+  historyPathSeen.set(key, route);
+  debugLog('history', 'path=' + route + ' sid=' + key.slice(0, 12) + (detail ? ' ' + detail : ''));
+}
+
+/**
  * 拉取 DSH 会话历史（供流式回放轮询）。
- * 新版 dsh（0.1.2-rc.x）端点改名为 session/page，入参变为
- * { address: {kind:'session', sessionId}, throughSeq, maxMessages }，其中
- * throughSeq 不可超过会话当前游标（超出时网关报 "past cursor N" 并回带 N）。
- * 这里先用 0 探测游标，再按游标取尾部一页，并归一化为旧 { events: [...] }
- * 形态；老版本 dsh 回退 session.history（{sessionId}）。
- * @param {string} base
- * @param {string} sid DSH 会话 id
+ * 两代契约：
+ * - dsh 0.2.2+：`session/page` **省略 throughSeq** 即「到最新游标为止的尾部一页」，
+ *   返回体自带 `{ cursor, records, hasMore }`；
+ * - dsh 0.1.2-rc.x ~ 0.2.1：必须显式 `throughSeq`，越界时报错里带当前游标。
+ * 因此先走新语义（不依赖错误文案），再回落旧探测（两种文案都认），最后回落
+ * 老版本 `session.history`。归一化为旧 `{ events: [...] }` 形态。
+ * @param {string} base DSH 基地址
+ * @param {string} sid 会话 id
  * @returns {Promise<{events: any[]}>}
  */
 async function fetchSessionHistory(base, sid) {
-  const pagePayload = (seq, maxMessages) => ({
-    address: { kind: 'session', sessionId: sid },
-    throughSeq: seq,
-    maxMessages
-  });
-  try {
-    // 1) 游标探测：空会话返回 "past cursor -1"；非空会话 throughSeq=0 总是合法，
-    //    但为了拿到“最新游标”，这里直接解析探测错误的 cursor 值更省一轮——
-    //    因此先用一个必然越界的大值试探，从错误里解析当前游标。
-    let cursor = -1;
-    try {
-      await dshRpc(base, 'session.page', pagePayload(Number.MAX_SAFE_INTEGER, 1), 15000);
-      // 理论不可达（MAX_SAFE_INTEGER 必然越界）；可达时说明没有游标校验，直接按 0 取。
-      cursor = 0;
-    } catch (e) {
-      const m = /past cursor (-?\d+)/.exec(String((e && e.message) || ''));
-      if (!m) throw e;
-      cursor = parseInt(m[1], 10);
-      if (!Number.isFinite(cursor)) cursor = -1;
-    }
-    if (cursor < 0) {
-      return { events: [] }; // 空会话
-    }
-    // 2) 按游标取尾部一页（从最新事件向前回溯 maxMessages 条）。
-    const page = await dshRpc(base, 'session.page', pagePayload(cursor, 4000), 15000);
-    const records = Array.isArray(page && page.records) ? page.records : [];
-    return { events: records.map((x) => (x && x.event) ? x.event : x) };
-  } catch (_) {
-    // 老版本 dsh：旧端点 + 旧入参。
-    const hist = await dshRpc(base, 'session.history', { sessionId: sid }, 15000);
-    return hist;
-  }
+  return fetchSessionHistoryWith(dshRpc, base, sid);
 }
 
+/**
+ * 同 fetchSessionHistory，但 RPC 可注入（离线测试用）。
+ * @param {Function} rpc (base, method, payload, timeoutMs) => Promise<any>
+ * @param {string} base
+ * @param {string} sid
+ * @returns {Promise<{events: any[]}>}
+ */
+async function fetchSessionHistoryWith(rpc, base, sid) {
+  const pagePayload = (extra) => Object.assign({
+    address: { kind: 'session', sessionId: sid }
+  }, extra);
+  const toEvents = (page) => {
+    const records = Array.isArray(page && page.records) ? page.records : [];
+    return records.map((x) => (x && x.event) ? x.event : x);
+  };
+  try {
+    // 1) 新语义：省略 throughSeq = 取尾部一页（0.2.2 起也不再需要「从报错里读游标」）。
+    const page = await rpc(base, 'session.page', pagePayload({ maxMessages: 4000 }), 15000);
+    if (!page || !Array.isArray(page.records)) throw new Error('session.page 返回缺少 records');
+    const events = toEvents(page);
+    noteHistoryPath(sid, 'page-tail', 'cursor=' + (Number.isFinite(page.cursor) ? page.cursor : '?') + ' n=' + events.length);
+    return { events };
+  } catch (eTail) {
+    // 2) 旧语义：越界探一次，把报错里的游标当作「最新游标」再取尾部一页。
+    try {
+      let cursor = 0;
+      try {
+        await rpc(base, 'session.page', pagePayload({ throughSeq: Number.MAX_SAFE_INTEGER, maxMessages: 1 }), 15000);
+      } catch (eProbe) {
+        const parsed = sessionCursorFromError(eProbe && eProbe.message);
+        if (parsed === null) throw eProbe;
+        cursor = parsed;
+      }
+      if (cursor < 0) {
+        noteHistoryPath(sid, 'empty', 'cursor=' + cursor);
+        return { events: [] }; // 空会话
+      }
+      const page = await rpc(base, 'session.page', pagePayload({ throughSeq: cursor, maxMessages: 4000 }), 15000);
+      const events = toEvents(page);
+      noteHistoryPath(sid, 'page-probe', 'cursor=' + cursor + ' n=' + events.length);
+      return { events };
+    } catch (ePage) {
+      // 3) 老版本 dsh：旧端点 + 旧入参。
+      noteHistoryPath(sid, 'legacy', 'err=' + String((ePage && ePage.message) || ePage).slice(0, 80));
+      const hist = await rpc(base, 'session.history', { sessionId: sid }, 15000);
+      return hist;
+    }
+  }
+}
 
 // =====================================================================
 // 磁盘直读：解析 VS Code 私有的 chatSessions/*.jsonl 会话文件
@@ -7674,6 +7725,10 @@ module.exports.__internals = {
   checkDshModelDrift,
   registerDshModelProvider,
   dshRpc,
+  fetchSessionHistory,
+  fetchSessionHistoryWith,
+  sessionCursorFromError,
+  noteHistoryPath,
   httpPostJson,
   fetchSessionHistory,
   dshEventText,

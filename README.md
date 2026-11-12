@@ -316,6 +316,7 @@ dsh `0.1.2-rc` 起为 Web GUI 启用了浏览器认证：每次 `dsh web` 启动
 - **启动参数**：`--no-open` 先经 `dsh web --help` 探测，老版本不支持就不传（不会因未知参数导致启动失败）；
 - **认证链路**：面板加载前会探测首页状态——旧版返回 200（无认证）即走原直连路径，不启用代理注入；「重启并自动认证」等引导也只在探测到 401 时出现；
 - **RPC 端点**：扩展按新版斜杠端点（`workspace/create` 等）请求，收到 404 自动回退旧点号端点（`workspace.create`）；`session/page` 不可用时回退 `session.history`；
+- **历史游标**：dsh 0.2.2+ 直接按「省略 `throughSeq` 取最新尾部」拉历史；旧版回退到越界探测（兼容 `past cursor N` 与 `session history cut N exceeds M` 两代文案）；更老版本回退 `session.history`；
 - **完全启动等待**：以「`dsh web:` 打印行」为就绪信号（新旧版本都会打印）；个别从不打印的极老版本会被记忆（`dsh.quietBoot`），之后不再等待。
 
 ### 远程服务器（vscode-server）场景

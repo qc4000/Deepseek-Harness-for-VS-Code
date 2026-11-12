@@ -335,7 +335,7 @@ webview → 宿主：{ type:'dsh-workspace-pin-unavailable' }   // 8s 内没收�
 | --- | --- | --- |
 | RPC 端点 | `/api/workspace/create` 等斜杠 | `/api/workspace.create`（404 或 `raw==='not found'` 时回退） |
 | RPC 信封 | `{type:'client-request', rpcId, method, payload:{args:{request:<业务参数>}}}` | `payload` 直接是业务参数 |
-| 历史 | `session/page {address:{kind:'session',sessionId}, throughSeq, maxMessages}`；`throughSeq` 越界报 `past cursor N` | `session/history {sessionId}` |
+| 历史 | 0.2.2+：`session/page {address:{kind:'session',sessionId}, maxMessages}`（省略 `throughSeq` = 到最新游标的尾部一页，返回 `{cursor,records,hasMore}`）；0.1.2-rc.x~0.2.1：必须带 `throughSeq`，越界报 `past cursor N`（0.2.2 起改为 `session history cut N exceeds M`） | `session/history {sessionId}` |
 | 事件 | `assistant/message`（`data.message.content[].text`） | `assistant/chunk`（`text-delta` / `block-end`） |
 | 启动 | `dsh web --host … --port … [--no-open]` | `--no-open` 先 `dsh web --help` 探测；误判时去参重试一次 |
 | 认证 | stdout `dsh web: …?token=…`，token → 签名 Cookie（SameSite=Strict，绑定 Host） | 无认证时首页 200，代理不介入 |

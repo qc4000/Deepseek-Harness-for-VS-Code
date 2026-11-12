@@ -179,24 +179,26 @@ async function main() {
     assert.ok(scParsed.result && scParsed.result.ok === true && scParsed.result.value && scParsed.result.value.sessionId, 'session/create 应返回 sessionId：' + sc.body.slice(0, 200));
     const newSid = scParsed.result.value.sessionId;
 
-    // session/page：provider 历史轮询路径（fetchSessionHistory 的两步游标探测）
+    // session/page：provider 历史轮询路径（dsh 0.2.2+ 省略 throughSeq = 取到最新游标的尾部一页）
     const pageCall = (seq) => JSON.stringify({
       type: 'client-request',
       rpcId: 'e2e-pg-' + crypto.randomBytes(3).toString('hex'),
       method: 'session/page',
-      payload: { args: { request: { address: { kind: 'session', sessionId: newSid }, throughSeq: seq, maxMessages: 100 } } }
+      payload: {
+        args: {
+          request: Object.assign(
+            { address: { kind: 'session', sessionId: newSid }, maxMessages: 100 },
+            seq === undefined ? {} : { throughSeq: seq }
+          )
+        }
+      }
     });
-    let cursor = -1;
-    const probe = await getJson(pport, '/api/session/page', 'POST', pageCall(Number.MAX_SAFE_INTEGER));
-    const pm = /past cursor (-?\d+)/.exec(probe.body);
-    if (pm) cursor = parseInt(pm[1], 10);
-    console.log('    POST 代理 /api/session/page 探测 → 游标 ' + cursor);
-    assert.ok(cursor >= 0, '应从错误信息解析出游标');
-    const pg = await getJson(pport, '/api/session/page', 'POST', pageCall(cursor));
+    const pg = await getJson(pport, '/api/session/page', 'POST', pageCall(undefined));
     assert.strictEqual(pg.status, 200, '经代理 session/page 应 200');
     const pgParsed = JSON.parse(pg.body);
     assert.ok(pgParsed.result && pgParsed.result.ok === true && Array.isArray(pgParsed.result.value.records), 'session/page 应返回 records：' + pg.body.slice(0, 200));
-    console.log('    POST 代理 /api/session/page → ok（records=' + pgParsed.result.value.records.length + '，hasMore=' + pgParsed.result.value.hasMore + '）');
+    assert.ok(typeof pgParsed.result.value.cursor === 'number', 'session/page 应返回 cursor（0.2.2+ 新语义）：' + pg.body.slice(0, 200));
+    console.log('    POST 代理 /api/session/page → ok（records=' + pgParsed.result.value.records.length + '，cursor=' + pgParsed.result.value.cursor + '，hasMore=' + pgParsed.result.value.hasMore + '）');
 
     console.log('[5] 真实重启场景（与扩展「重启 dsh web」同路径）');
     const tokenBeforeRestart = proxy.token();

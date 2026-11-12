@@ -7,7 +7,7 @@
 ## 1. 命令
 
 ```bash
-npm test                      # 语法检查 + 22 套离线单测（1258 项断言）
+npm test                      # 语法检查 + 23 套离线单测（1279 项断言）
 npm run test:one -- file-link # 只跑文件名含 file-link 的套件（TDD 内循环）
 npm run test:verbose          # 逐套件完整输出（看每个 ✓/✗）
 npm run test:all              # 追加真实 dsh e2e（需本机已安装 dsh）
@@ -62,6 +62,7 @@ CI 只认退出码，不看输出格式。
 | `dsh-model-mapping.test.js` | 38 | 条目 id/名称（改 id 会丢用户已选）；非 `dsh` 条目映射到 DSH 在册模型；provider info 字段合法（成本串/上限/capabilities/推理档位 schema）；`findMissingDshModels` 漂移检测；诊断文件落临时 HOME |
 | `dsh-sidebar.test.js` | 196（有 1 条 zoom 断言待随 1.0.3 回退更新，既有问题、与 005 无关） | 侧栏裁剪中继脚本（`vm` 真跑）：stage/clip 分层与缩放解耦、auto/show/hide × 宽度、280/420/56/0 与 `+4` 手柄余量、异常测量丢弃、按钮切换与上报、宿主 `toggle`/`config` 消息、未测量时不裁并上报 unavailable；测量插件文件/声明/语法/安装幂等/`show` 不安装；插件客户端仿真（握手前静默、上报、拖动重报、折叠标记、卸载清理、元素缺失不误报）；**抽屉态回归（015）**：grid 首轨优先测量 + `drawer` 上报（矩形 280 不算数）与 grid 不可解析回退、抽屉态 `crop` 恒 0、按钮/命令转调 `layout-toggle`（不写覆盖）、回执补发 `request-layout` 与 `dsh-sidebar-toggle-failed`（reason 白名单 + 每类提示一次）、缺 `drawer` 字段走 004 老语义、**240–1400 固定点收敛扫描（无 2-周期振荡、分段 0/56/284）**；**抖动诊断与缩放校准（016）**：插件环形日志（形状/120 上限/clear/`innerWidth`）、1s≥7 次翻转自动 `layout-diag(flip-storm)` 与 10s 限流、`layout-diag-request` 导出回包、中继实测 ratio 裁剪（1.25→70/355、0.75→42/213）与缺失/越界回退、ratio 回退留痕、auto 拖动 150ms 尾沿去抖、诊断合并上报 `dsh-sidebar-diag` 与 600ms 超时兜底、扩展侧 `normalizeSidebarDiag` 净化 + 输出面板写入 + 状态栏一次提示 + 命令与兜底文案、**四档缩放 × 240–1400 收敛扫描（期望 `round(轨道×s)`）**；**手动选择跨断点保持（017）**：抽屉态点「显示/隐藏」同时写覆盖（`dsh-sidebar-state`）并同步页面内 `sidebarOverride`、拉宽到 900/1200 后按用户选择执行（不再被 auto 重算冲掉）、拉回抽屉态展示仍按 `collapsed`、grid 态手动显示后拖动同样不被重置；**调试日志落盘（018）**：`dshPanel.debugLogToFile` 默认关不建文件、开启后诊断包/事件写入 `<HOME>/.dsh-debug/dsh-vscode-debug.log` 并首次提示路径、`token=` 脱敏、超 2MB 轮转 `.log.1`、命令「打开调试日志」打开/指引、目录不可写时提示一次且输出面板照写；**事件流自动落盘（019）**：关闭不产生 trace 消息（零队列/零定时器）、开启后 1s 批量推送（含 layout）并一次追加 `[sidebar-trace]`、单包 ≤200 上限、热开关、条目白名单净化、`[env]` 环境行 |
 | `dsh-stream-events.test.js` | 22 | `assistant/message` 只回写 text 块；旧 `text-delta` 增量；历史 `block-end` 不重复；`seq` 游标推进；`turn/end` 结束与异常原因；空事件列表安全 |
+| `session-history.test.js` | 21 | 会话历史游标（spec 022）：新语义（省略 throughSeq 取尾部、只发 1 次）/ 旧探测两步 / 两代越界文案解析 / 空会话 / 老 dsh `session.history` 兜底 / `[history]` 路径留痕不刷日志 |
 | `file-link-bridge.test.js` | 38 | `vm` 真跑 webview 中继脚本：握手 ack（含重试）、reveal 转发、result 回传、origin/source 校验、`off` 模式不转发；`dsh-open-link` / `insert-selection` 既有中继不受影响；diff 模式 `ack.diff`、轮坐标透传与非法坐标丢弃、`reveal-ack` 回传；`off` 模式 ack 仍允许登录/外链 |
 | `file-link-client-sim.test.js` | 56 | 插件客户端仿真：未 ack 前不介入；命中按钮 → 阻断 + 发 reveal；`ok=true` 不回放 / `ok=false` 回放 / 超时回放；修饰键不接管；非链接按钮不接管；独立浏览器不打招呼；卸载后清定时器；diff 模式带轮坐标、`reveal-ack` 把等待从 2.5 s 放宽到 6 s；坐标两条退路（无 `ctx.get` 只有属性访问、祖先无标记取「前一个」标记行）；**布局 ack（`{layout:true}`）不得覆盖 `diffMode`**（真机根因回归）；无轮标记**不带任何轮坐标**（013：不跨轮展示、回到 005 AC-7）；上报 DSH 会话 `cwd` 与缺失时不带；诊断环形日志 `log()/.clear()/.cwd()`、失败原因码 `reason` |
 | `file-link-diff.test.js` | 141 | 轮级 diff 宿主侧：坐标净化、匹配候选、标题（轮级 vs HEAD）、二进制/体积判定；404 三种含义（`released`/`no-record`/`unavailable`）与 `no-text` 的原因映射及各自文案；`dsh-diff` 虚拟文档存取与容量淘汰；三级降级（P1 → P0 → L0）与提示文案；git 基线（无改动/非仓库/空仓库/二进制/超大）；`handleWebviewMessage` 接单回执与非法坐标丢弃；**工作区外链接（010）**（只按点击所属轮取数、失败回执带 reason）；**latest 跨轮坐标移除（013）**（净化拒绝、latest 坐标零查询走 P0、no-change/no-record 不换轮、no-coord 文案）；**opt-in 兜底（012）**：默认关闭不读盘、开启后 git 对比 → 打开、revealAndOpen/revealOnly 行为、不存在路径不接管：只用轮级记录开 diff（不定位/不读盘/不跑 HEAD）、行号后缀重试、无坐标不猜、各失败原因文案、非 diff 模式提示切到 `diffAndOpen` |
