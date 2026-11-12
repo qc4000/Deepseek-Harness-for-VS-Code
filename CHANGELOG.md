@@ -2,6 +2,32 @@
 
 本项目遵循 [语义化版本](https://semver.org/lang/zh-CN/)。完整提交历史见 [GitHub](https://github.com/Vithrive/Deepseek-Harness-for-VS-Code/commits/main)。
 
+## 1.1.2
+
+**Copilot 桥接（修复）**
+
+- **dsh 0.2.2 上历史回放不再失败**：桥接靠 `session/page` 拉历史做流式回写，旧实现是
+  「故意越界 → 从报错文案里解析游标」，依赖 dsh 的 `past cursor N`；0.2.2 把文案改成
+  `session history cut N exceeds M`，解析失配后 `fetchSessionHistory` 抛错，Copilot 侧表现为
+  「读取 DSH 任务状态失败」（另一条回放路径则静默返回）。
+  现在三层获取：① 新语义（0.2.2+：省略 `throughSeq` = 到最新游标的尾部一页，直接读
+  `{cursor, records, hasMore}`，不再用错误文案做控制流）；② 旧语义回退（越界探测，两代文案都认）；
+  ③ 老版本兜底（`session.history`）。旧 dsh 行为完全不变。
+- 新增调试留痕：开启 `dshPanel.debugLogToFile` 后，每个会话记录
+  `[history] path=page-tail|page-probe|legacy sid=… cursor=… n=…`（同会话同路径只写一条）。
+- 规格：[022-session-cursor](docs/sdd/specs/022-session-cursor/spec.md)；
+  测试：新增 `session-history` 21 项；`npm test` 23 套 / 1279 项、`npm run test:all`
+  （真实 dsh 0.2.2，含 e2e）24 套 / 1279 项全绿 —— e2e 的 `session/page` 步骤此前必红，已转绿。
+
+**文档**
+
+- 宪法第一条补充：为了插件的易用性，内置插件可以调用 DSH 公开客户端服务（如
+  `uiWorkspace.openWorkspace`、`layout.toggleSidebar`）响应用户操作，但不得改 DOM；其余要求不变。
+
+**校验**
+
+- 实机日志（`1.1.2-dev.1`）：`[history] path=page-tail sid=… cursor=3 n=4` —— 新语义链路生效。
+
 ## 1.1.1
 
 **侧栏裁剪（修复，需重启 dsh web）**
