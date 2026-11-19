@@ -193,6 +193,9 @@ async function main() {
         }
       }
     });
+    // dsh 0.2.2+ 省略 throughSeq 即「到最新游标为止的尾部一页」，直接读返回体的
+    // cursor——比上游「越界探测 + 从错误文案解析」少一次往返，也不受文案变化影响
+    // （本地 c3c8dae 的新语义，合并时保留本地实现）。
     const pg = await getJson(pport, '/api/session/page', 'POST', pageCall(undefined));
     assert.strictEqual(pg.status, 200, '经代理 session/page 应 200');
     const pgParsed = JSON.parse(pg.body);

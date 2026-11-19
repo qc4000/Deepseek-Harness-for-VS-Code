@@ -232,32 +232,138 @@ function pickDesktopCli(dirs, exists = fs.existsSync) {
 }
 
 /**
+ * 解析 `reg query <键> /s …` 输出里出现的卸载项子键路径。
+ *
+ * 为什么需要它（Issue #29）：`reg query … /s /f "DeepSeek Harness" /d` 只打印
+ * 「数据命中」的值行；桌面版装在自定义目录（如 E:\DSH）时，InstallLocation 的数据
+ * 不含产品名，于是该行根本不会出现在输出里——旧实现只在输出里找 InstallLocation 行，
+ * 就漏掉了自定义目录安装（默认安装路径本身含 "DeepSeek Harness"，所以从没暴露）。
+ * 这里先取出命中的子键，再逐个 `reg query <子键>` 读全部值，与安装路径是否含产品名无关。
+ * @param {string} stdout
+ * @returns {string[]} 卸载项子键路径（已去重）
+ */
+function parseRegKeyPaths(stdout) {
+  const keys = [];
+  const seen = new Set();
+  for (const raw of String(stdout || '').split(/\r?\n/)) {
+    if (!/^HKEY_/i.test(raw)) continue; // 值行有缩进；Root 提示行不是键路径
+    const key = raw.trim();
+    if (key === '' || !/\\Uninstall\\/i.test(key)) continue;
+    const lower = key.toLowerCase();
+    if (seen.has(lower)) continue;
+    seen.add(lower);
+    keys.push(key);
+  }
+  return keys;
+}
+
+/** 取 Windows 风格路径的父目录（不依赖宿主平台的 path 实现，便于跨平台测试）。 */
+function windowsDirname(p) {
+  const v = String(p || '').trim().replace(/[\\/]+$/, '');
+  const idx = Math.max(v.lastIndexOf('\\'), v.lastIndexOf('/'));
+  return idx > 0 ? v.slice(0, idx) : v;
+}
+
+/**
+ * 在 `reg query <卸载项子键>` 的完整输出里找安装目录。
+ * InstallLocation 优先；缺失时从 DisplayIcon / UninstallString 的可执行文件反推
+ * 目录（部分安装器版本或清理工具会删掉 InstallLocation，但这两项仍在）。
+ * @param {string} stdout
+ * @returns {string[]} 候选安装目录
+ */
+function parseRegSubkeyDirs(stdout) {
+  const dirs = [];
+  for (const raw of String(stdout || '').split(/\r?\n/)) {
+    const m = /^\s*(InstallLocation|DisplayIcon|UninstallString)\s+REG_(?:SZ|EXPAND_SZ)\s+(.+?)\s*$/i.exec(raw);
+    if (!m) continue;
+    const name = m[1].toLowerCase();
+    const rawValue = m[2].trim();
+    if (name === 'installlocation') {
+      dirs.push(rawValue.replace(/^"(.*)"$/, '$1'));
+      continue;
+    }
+    if (name === 'displayicon') {
+      // DisplayIcon 形如 `E:\DSH\DeepSeek Harness.exe,0`，也见过 `"E:\DSH\x.exe",0`。
+      const comma = rawValue.indexOf(',');
+      let exe = (comma > 0 ? rawValue.slice(0, comma) : rawValue).trim();
+      exe = exe.replace(/^"(.*)"$/, '$1').trim();
+      const dir = windowsDirname(exe);
+      if (dir) dirs.push(dir);
+      continue;
+    }
+    // UninstallString 形如 `"E:\DSH\Uninstall DeepSeek Harness.exe" /currentuser /S`
+    const quoted = /^"([^"]+)"/.exec(rawValue);
+    const exe = quoted ? quoted[1] : rawValue.split(/\s+/)[0];
+    const dir = windowsDirname(exe);
+    if (dir) dirs.push(dir);
+  }
+  return dirs;
+}
+
+/**
+ * 展开 REG_EXPAND_SZ 里的 %VAR%（如 %ProgramFiles%），否则字面路径永远不存在。
+ * @param {string} value
+ * @param {Record<string, string | undefined>} [env]
+ * @returns {string}
+ */
+function expandRegEnv(value, env) {
+  const source = env || process.env;
+  return String(value || '').replace(/%([^%]+)%/g, (whole, name) => {
+    const hit = source[name] !== undefined ? source[name] : source[String(name).toUpperCase()];
+    return typeof hit === 'string' && hit !== '' ? hit : whole;
+  });
+}
+
+/**
  * 探测官网 Windows 桌面版的内置 CLI。
- * 安装位置来源：1) 注册表卸载项的 InstallLocation（覆盖自定义安装盘/目录，
- * 桌面版按用户安装写 HKCU，同时兼容 HKLM 的机器级安装）；2) 常见默认目录兜底。
+ * 安装位置来源：1) 注册表卸载项——优先读命中子键的 InstallLocation（覆盖自定义
+ * 安装盘/目录，修复 Issue #29），缺失时用 DisplayIcon / UninstallString 反推；
+ * 旧的「直接从 /f /d 输出里找 InstallLocation 行」保留作兜底（默认路径场景更快）；
+ * 2) 常见默认目录兜底（注册表被清理、安装器路径变体等）。
+ * @param {{run?: (cmd: string, args: string[], timeoutMs: number) => Promise<string>,
+ *          exists?: (p: string) => boolean, env?: Record<string, string | undefined>,
+ *          force?: boolean}} [opts] 测试注入口（run/exists/env）；force 允许非 Windows 上运行解析逻辑
  * @returns {Promise<{cmd: string, installDir: string} | null>}
  */
-async function probeDesktopDshCli() {
-  if (process.platform !== 'win32') return null;
+async function probeDesktopDshCli(opts = {}) {
+  if (process.platform !== 'win32' && !opts.force) return null;
+  const run = typeof opts.run === 'function' ? opts.run : runCommandOutput;
+  const exists = typeof opts.exists === 'function' ? opts.exists : fs.existsSync;
+  const env = opts.env || process.env;
   const dirs = [];
-  // 1) 注册表。/f … /d 按「数据」搜，卸载项 DisplayName 为 "DeepSeek Harness <版本>"。
   const keys = [
     'HKCU\\' + DESKTOP_UNINSTALL_KEY,
     'HKLM\\' + DESKTOP_UNINSTALL_KEY,
     'HKLM\\Software\\WOW6432Node\\Microsoft\\Windows\\CurrentVersion\\Uninstall'
   ];
+  // 子键路径可能含空格（按产品名建的卸载项），作为 cmd.exe 参数时需加引号。
+  const quoteArg = (s) => (/\s/.test(s) ? '"' + s + '"' : s);
   for (const key of keys) {
+    let out = '';
     try {
-      const out = await runCommandOutput('reg', ['query', key, '/s', '/f', '"DeepSeek Harness"', '/d'], 8000);
-      dirs.push(...parseRegInstallLocations(out));
-    } catch (_) { /* 该 hive 无匹配项或无权限：继续 */ }
+      // /f … /d 按「数据」搜，卸载项 DisplayName 为 "DeepSeek Harness <版本>"。
+      out = await run('reg', ['query', key, '/s', '/f', '"DeepSeek Harness"', '/d'], 8000);
+    } catch (_) {
+      continue; // 该 hive 无匹配项或无权限：继续下一个
+    }
+    // A) 旧解析：安装路径本身含产品名时（默认安装目录）该行会被打印，直接可用。
+    dirs.push(...parseRegInstallLocations(out));
+    // B) 新解析：命中的卸载项子键逐条读取全部值——自定义目录（E:\DSH）也能拿到。
+    for (const subkey of parseRegKeyPaths(out).slice(0, 16)) {
+      try {
+        const detail = await run('reg', ['query', quoteArg(subkey)], 6000);
+        dirs.push(...parseRegSubkeyDirs(detail));
+      } catch (_) {
+        // 子键读取失败（权限/已卸载）：跳过
+      }
+    }
   }
   // 2) 默认安装目录兜底（注册表被清理、安装器路径变体等）。
-  const localAppData = process.env.LOCALAPPDATA || path.join(os.homedir(), 'AppData', 'Local');
+  const localAppData = env.LOCALAPPDATA || path.join(os.homedir(), 'AppData', 'Local');
   dirs.push(path.join(localAppData, 'Programs', 'DeepSeek Harness'));
-  dirs.push(path.join(process.env.ProgramFiles || 'C:\\Program Files', 'DeepSeek Harness'));
-  dirs.push(path.join(process.env['ProgramFiles(x86)'] || 'C:\\Program Files (x86)', 'DeepSeek Harness'));
-  return pickDesktopCli(dirs);
+  dirs.push(path.join(env.ProgramFiles || 'C:\\Program Files', 'DeepSeek Harness'));
+  dirs.push(path.join(env['ProgramFiles(x86)'] || 'C:\\Program Files (x86)', 'DeepSeek Harness'));
+  return pickDesktopCli(dirs.map((dir) => (typeof dir === 'string' ? expandRegEnv(dir, env) : dir)), exists);
 }
 
 /** 定位桌面版内置 CLI（带缓存，避免面板每次刷新都查注册表）。 */
@@ -2962,7 +3068,68 @@ async function installedPluginVersion(profileDir, plugin) {
   return pkg && pkg.version ? pkg.version : null;
 }
 
-/** 用 npm pack 拉取插件并解压到 profile 的 node_modules（不依赖 pnpm）。 */
+/** 读取「插件包根目录」下的 package.json 版本（用于 vendor 副本）；不存在返回 null。 */
+async function pluginVersionAt(dir) {
+  const pkg = await readJsonFile(path.join(dir, 'package.json'));
+  return pkg && pkg.version ? pkg.version : null;
+}
+
+/** 随扩展分发的内置插件在 profile 里的 vendored 副本目录名。 */
+const VENDORED_PLUGINS_DIR = 'vendor';
+
+/**
+ * 内置插件在 profile package.json 里的依赖声明：`file:./vendor/<name>`。
+ *
+ * 为什么要写 dependencies（Issue #31）：扩展把插件直接写进 profile 的
+ * node_modules，但 pnpm（`dsh plugin add/install` 的底层）会把不在 dependencies
+ * 里的包当 extraneous 移到 node_modules/.ignored，dsh 启动时于是静默跳过这些
+ * bundle——文件链接跳转、剪贴板中继、window.open 重定向全部悄悄失效。
+ * 把插件同时写一份到 profile/vendor/ 并以 file: 依赖声明，pnpm 就会把它们当正常
+ * 依赖保留并链接回 node_modules。
+ * @param {string} name
+ * @returns {string}
+ */
+function vendoredPluginSpec(name) {
+  return 'file:./' + VENDORED_PLUGINS_DIR + '/' + name;
+}
+
+/**
+ * 幂等写入内置插件文件：同时写 vendor/<name>（pnpm 保留的稳定副本）与
+ * node_modules/<name>（dsh 立即加载用；若已被 pnpm 链接到 vendor，写入等价）。
+ * @param {string} profileDir
+ * @param {string} name
+ * @param {Record<string, string>} files 相对路径 → 内容
+ */
+async function writeBundledPlugin(profileDir, name, files) {
+  const bases = [
+    path.join(profileDir, VENDORED_PLUGINS_DIR, name),
+    path.join(profileDir, 'node_modules', name)
+  ];
+  for (const base of bases) {
+    for (const rel of Object.keys(files)) {
+      const dest = path.join(base, rel);
+      await fs.promises.mkdir(path.dirname(dest), { recursive: true });
+      await fs.promises.writeFile(dest, files[rel], 'utf8');
+    }
+  }
+}
+
+/**
+ * 内置插件是否需要（重新）落盘：node_modules 缺失/版本不符（例如被 dsh plugin
+ * 命令清理进了 .ignored），或 vendor 副本缺失/版本不符（v1.1.3 起才有的副本）。
+ * @param {string} profileDir
+ * @param {string} name
+ * @param {string} version
+ * @returns {Promise<boolean>}
+ */
+async function bundledPluginNeedsInstall(profileDir, name, version) {
+  const installed = await installedPluginVersion(profileDir, name);
+  const vendored = await pluginVersionAt(path.join(profileDir, VENDORED_PLUGINS_DIR, name));
+  return installed !== version || vendored !== version;
+}
+
+/**
+ * 用 npm pack 拉取插件并解压到 profile 的 node_modules（不依赖 pnpm）。 */
 async function installPluginViaNpm(profileDir, plugin) {
   // 安全面守卫：plugin 仅允许内置常量（npm pack/tar 的命令拼接不做通用转义）。
   if (plugin !== DSH_PLUGIN_NAME) {
@@ -3064,31 +3231,12 @@ function clipboardPluginVersion() {
 
 /**
  * 确保内置兼容插件 dsh-webview-clipboard 已落盘并声明（不经 npm）。
- * @returns {Promise<boolean>} 本次是否发生新增/升级（true 时需重启 dsh web 生效）。
+ * v1.1.3 起同时写 vendor/ 副本并声明 `file:` 依赖，避免被 `dsh plugin` 的 pnpm
+ * 当成 extraneous 清理（Issue #31）。
+ * @returns {Promise<boolean>} 本次是否发生新增/升级/修复（true 时需重启 dsh web 生效）。
  */
 async function ensureClipboardPlugin(profileDir) {
-  try {
-    const version = clipboardPluginVersion();
-    const installed = await installedPluginVersion(profileDir, CLIPBOARD_PLUGIN_NAME);
-    if (installed === version) {
-      await ensureProfileDeclaration(profileDir, CLIPBOARD_PLUGIN_NAME, null);
-      return false; // 版本一致，无需写入
-    }
-    const files = clipboardPluginFiles();
-    const base = path.join(profileDir, 'node_modules', CLIPBOARD_PLUGIN_NAME);
-    for (const rel of Object.keys(files)) {
-      const dest = path.join(base, rel);
-      await fs.promises.mkdir(path.dirname(dest), { recursive: true });
-      await fs.promises.writeFile(dest, files[rel], 'utf8');
-    }
-    // dependencies 不写入该包（npm 注册表上没有），只登记 bundles 供 DSH 加载。
-    await ensureProfileDeclaration(profileDir, CLIPBOARD_PLUGIN_NAME, null);
-    return true;
-  } catch (e) {
-    console.error(`[DeepSeek Harness] 安装内置插件 ${CLIPBOARD_PLUGIN_NAME} 失败：`, e);
-    vscode.window.showWarningMessage(`安装 DSH 剪贴板兼容插件 ${CLIPBOARD_PLUGIN_NAME} 失败：${e.message}`);
-    return false;
-  }
+  return ensureBundledPlugin(profileDir, CLIPBOARD_PLUGIN_NAME, '剪贴板兼容');
 }
 
 /**
@@ -3125,28 +3273,26 @@ function bundledPluginVersion(name) {
 
 /**
  * 确保某个内置插件已落盘并声明（不经 npm，幂等）。
+ *
+ * v1.1.3 起同时写 vendor/<name> 副本并声明 `file:./vendor/<name>` 依赖（Issue #31）：
+ * 只写 node_modules 时，pnpm（`dsh plugin add/install` 的底层）会把不在 dependencies
+ * 里的包当 extraneous 移进 node_modules/.ignored，dsh 启动静默跳过这些 bundle——
+ * 文件链接、剪贴板中继、外链跳转全部悄悄失效。
  * @param {string} profileDir
  * @param {string} name
  * @param {string} label 用于提示文案的中文名
- * @returns {Promise<boolean>} 本次是否发生新增/升级（true 时需重启 dsh web 生效）
+ * @returns {Promise<boolean>} 本次是否发生新增/升级/修复（true 时需重启 dsh web 生效）
  */
 async function ensureBundledPlugin(profileDir, name, label) {
   try {
     const version = bundledPluginVersion(name);
-    const installed = await installedPluginVersion(profileDir, name);
-    if (installed === version) {
-      await ensureProfileDeclaration(profileDir, name, null);
+    if (!(await bundledPluginNeedsInstall(profileDir, name, version))) {
+      // 两侧一致仍补声明：旧 profile 只登记了 bundles，升级后补上 file: 依赖。
+      await ensureProfileDeclaration(profileDir, name, vendoredPluginSpec(name));
       return false; // 版本一致，无需写入
     }
-    const files = bundledPluginFiles(name);
-    const base = path.join(profileDir, 'node_modules', name);
-    for (const rel of Object.keys(files)) {
-      const dest = path.join(base, rel);
-      await fs.promises.mkdir(path.dirname(dest), { recursive: true });
-      await fs.promises.writeFile(dest, files[rel], 'utf8');
-    }
-    // dependencies 不写入该包（npm 注册表上没有），只登记 bundles 供 DSH 加载。
-    await ensureProfileDeclaration(profileDir, name, null);
+    await writeBundledPlugin(profileDir, name, bundledPluginFiles(name));
+    await ensureProfileDeclaration(profileDir, name, vendoredPluginSpec(name));
     return true;
   } catch (e) {
     console.error(`[DeepSeek Harness] 安装内置插件 ${name} 失败：`, e);
@@ -3214,31 +3360,11 @@ function openExternalPluginVersion() {
 
 /**
  * 确保内置插件 dsh-vscode-open-external 已落盘并声明（不经 npm）。
- * @returns {Promise<boolean>} 本次是否发生新增/升级（true 时需重启 dsh web 生效）。
+ * v1.1.3 起同时写 vendor/ 副本并声明 `file:` 依赖（Issue #31）。
+ * @returns {Promise<boolean>} 本次是否发生新增/升级/修复（true 时需重启 dsh web 生效）。
  */
 async function ensureOpenExternalPlugin(profileDir) {
-  try {
-    const version = openExternalPluginVersion();
-    const installed = await installedPluginVersion(profileDir, OPEN_EXTERNAL_PLUGIN_NAME);
-    if (installed === version) {
-      await ensureProfileDeclaration(profileDir, OPEN_EXTERNAL_PLUGIN_NAME, null);
-      return false; // 版本一致，无需写入
-    }
-    const files = openExternalPluginFiles();
-    const base = path.join(profileDir, 'node_modules', OPEN_EXTERNAL_PLUGIN_NAME);
-    for (const rel of Object.keys(files)) {
-      const dest = path.join(base, rel);
-      await fs.promises.mkdir(path.dirname(dest), { recursive: true });
-      await fs.promises.writeFile(dest, files[rel], 'utf8');
-    }
-    // dependencies 不写入该包（npm 注册表上没有），只登记 bundles 供 DSH 加载。
-    await ensureProfileDeclaration(profileDir, OPEN_EXTERNAL_PLUGIN_NAME, null);
-    return true;
-  } catch (e) {
-    console.error(`[DeepSeek Harness] 安装内置插件 ${OPEN_EXTERNAL_PLUGIN_NAME} 失败：`, e);
-    vscode.window.showWarningMessage(`安装 DSH 外链打开插件 ${OPEN_EXTERNAL_PLUGIN_NAME} 失败：${e.message}`);
-    return false;
-  }
+  return ensureBundledPlugin(profileDir, OPEN_EXTERNAL_PLUGIN_NAME, '外链打开');
 }
 
 /**
@@ -5530,7 +5656,9 @@ function applySidebarPolicyChange() {
  * 配套插件新增/升级后的统一提示：新的客户端 bundle 要重启 dsh web 才会加载。
  */
 function notifyDshPluginsChanged() {
-  vscode.window.showInformationMessage('已自动安装/更新 DSH 插件（dsh-drop-caret / dsh-webview-clipboard / dsh-vscode-file-links / dsh-vscode-layout / dsh-vscode-workspace / dsh-vscode-keys / dsh-vscode-open-external），请点击面板顶部的「重启 dsh web」使其生效。');
+  // 文案吸收上游 Issue #31 的关键信息：这些插件可能被 `dsh plugin` 命令清理过，
+  // 让用户知道「为什么会突然失效」而不只是「重启一下」。
+  vscode.window.showInformationMessage('已自动安装/更新或修复 DSH 配套插件（dsh-drop-caret / dsh-webview-clipboard / dsh-vscode-file-links / dsh-vscode-layout / dsh-vscode-workspace / dsh-vscode-keys / dsh-vscode-open-external）。这些插件可能被 dsh plugin 命令清理过，请点击面板顶部的「重启 dsh web」使其生效。');
   debugLog('plugins', '内置插件有变更 → 需重启 dsh web 生效');
 }
 
@@ -5595,10 +5723,11 @@ async function preparePanelHtml(isTab) {
     };
   }
 
-  // 自动确保 DSH 侧配套插件 dsh-drop-caret 在位（拖文件/代码段插入对话框）。
+  // 自动确保 DSH 侧配套插件（dsh-drop-caret + 三个内置兼容插件）在位。
+  // v1.1.3 起还会修复被 `dsh plugin` 命令清理进 node_modules/.ignored 的插件（Issue #31）。
   const pluginInstalled = await ensureDshPlugins();
   if (pluginInstalled && (await checkUrl(getUrl()))) {
-    // 服务已在运行但插件刚装上，需重启 dsh web 才加载。
+    // 服务已在运行但插件刚装上/被清理后修复，需重启 dsh web 才加载（Issue #31）。
     notifyDshPluginsChanged();
   }
 
@@ -7740,6 +7869,10 @@ module.exports.__internals = {
   getDshCommand,
   shellCommandText,
   parseRegInstallLocations,
+  parseRegKeyPaths,
+  parseRegSubkeyDirs,
+  expandRegEnv,
+  windowsDirname,
   pickDesktopCli,
   probeDesktopDshCli,
   findDesktopDshCli,

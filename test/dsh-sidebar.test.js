@@ -387,7 +387,8 @@ function report(realm, sidebarWidth, collapsed, drawer, innerWidth) {
     ok(fs.existsSync(path.join(profile, 'node_modules', PLUGIN_SOURCE, 'lib', 'client.js')), '插件文件落到 dsh web profile');
     const profilePkg = JSON.parse(fs.readFileSync(path.join(profile, 'package.json'), 'utf8'));
     ok((profilePkg.dsh.profile.bundles || []).includes(PLUGIN_SOURCE), '登记到 dsh.profile.bundles');
-    ok(!profilePkg.dependencies || !profilePkg.dependencies[PLUGIN_SOURCE], '不写入 dependencies');
+    ok(profilePkg.dependencies && profilePkg.dependencies[PLUGIN_SOURCE] === 'file:./vendor/' + PLUGIN_SOURCE, '以 file:./vendor/<name> 声明依赖（Issue #31：防 pnpm 当 extraneous 清理）');
+    ok(fs.existsSync(path.join(profile, 'vendor', PLUGIN_SOURCE, 'package.json')), 'vendor 副本同样落盘（pnpm 保留的稳定位置）');
     ok((await I.ensureLayoutPlugin(profile)) === false, '版本一致 → 幂等（不重复写盘）');
 
     config['dshPanel.dshSidebar'] = 'show';

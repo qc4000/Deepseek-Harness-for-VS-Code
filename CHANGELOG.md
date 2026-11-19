@@ -2,6 +2,56 @@
 
 本项目遵循 [语义化版本](https://semver.org/lang/zh-CN/)。完整提交历史见 [GitHub](https://github.com/Vithrive/Deepseek-Harness-for-VS-Code/commits/main)。
 
+## 1.1.3
+
+**忠实窗口（面板）**
+
+- **桌面版装在自定义目录（如 `E:\DSH`）时也能识别（Issue #29，同步上游）**：官网 Windows 桌面版装在
+  不含产品名的自定义目录时，扩展探测不到内置 CLI、面板报「未检测到 DeepSeek Harness」。根因是
+  `reg query … /f … /d` 只打印「数据命中」的值行——默认安装路径本身含 "DeepSeek Harness" 所以从没暴露。
+  现在先按搜索输出取出命中的卸载项**子键**，再逐个子键读**全部值**（`InstallLocation` 优先，缺失时从
+  `DisplayIcon` / `UninstallString` 反推目录），并展开 `%ProgramFiles%` 类环境变量；旧解析保留兜底，
+  默认目录兜底不变。`probeDesktopDshCli` 增加 `run` / `exists` / `env` / `force` 测试注入口。
+- **配套插件不再被 `dsh plugin` 命令静默清掉（Issue #31，同步上游）**：内置插件此前只写 profile 的
+  `node_modules`、不在 `dependencies` 里，pnpm（`dsh plugin add/install` 底层）会把它们当 extraneous
+  移进 `node_modules/.ignored`——dsh 启动静默跳过，文件链接、剪贴板中继、`window.open` 桥全部悄悄失效。
+  现在插件同时写 `profiles/web/vendor/<name>` 并声明 `"<name>": "file:./vendor/<name>"`（pnpm 视为正常
+  依赖保留并链接回 `node_modules`）；每次准备面板检查两侧，缺失或版本不符立即重建（自愈）；发生
+  安装/修复且 dsh 已在运行时经 `notifyDshPluginsChanged()` 提示「重启 dsh web」并点名「可能被 dsh plugin
+  命令清理过」，不再静默降级。**范围按本地约定扩大**：走本地通用 `ensureBundledPlugin` 的全部内置插件
+  （剪贴板 / 文件链接 / 外链 / 布局 / 工作区 / 快捷键 / 变更对比）统一获得该机制，`dsh-drop-caret`
+  的 npm 安装链路不变。
+- **文件链接同时接管 `<a href>` 本地路径（Issue #32，同步上游）**：`dsh-vscode-file-links`
+  0.2.8 → 0.2.9——除既有 `button.fileLink` 外，也接管普通 `<a href>` 形式的本地路径链接（相对路径、
+  `./` 前缀、盘符绝对路径）；外部链接、`#锚点`、`mailto:` / `file:` / `javascript:` 等 scheme、带修饰键
+  的点击一律不接管；宿主回执拒绝（不在工作区内）时回放原始点击，默认行为不变。**本地增强**：anchor
+  点击在 diff 模式下同样携带点击所属轮坐标（取不到轮标记则不带，与 button 分支同一套 013 语义）。
+- **Issue #32 核查结论（同步上游）**：报告声称的根因（路径含分隔符时 DSH 不渲染 `button.fileLink`）在
+  DSH 0.2.2-rc.1 / rc.4 上均无法复现（链接均正常渲染、插件与宿主对分隔符路径也能正常解析），症状更可能
+  与 #31 的配套插件被清理有关——本版两项加固共同覆盖这些失败路径。
+
+**测试**
+
+- 新增 `bundled-plugin-vendor`（33 项）：三个插件 vendor/node_modules 双份落盘、`file:` 依赖声明、
+  `.ignored` 式清理后自愈、双缺失时从扩展内置文件重建、幂等；
+- `desktop-app-support` 37 → 62 项（Issue #29：自定义目录复现、子键提取与逐条读取、
+  `DisplayIcon` / `UninstallString` 兜底、含空格子键加引号、`REG_EXPAND_SZ` 展开、注入式 probe 命中）；
+- `file-link-client-sim` 56 → 65 项（anchor 接管含分隔符/盘符绝对路径/内部子节点、外部链接/锚点/
+  非本地 scheme/修饰键不接管、回执失败回放）；
+- `workspace-file-link` 94 → 98 项（vendored 布局、依赖声明、双侧清理后重建）；`workspace-pin`
+  73 → 74 项、`dsh-sidebar` 196 → 197 项、`external-link-open` 51 → 52 项——四处旧「不写 dependencies」
+  断言改为新契约（`file:./vendor/<name>` + vendor 副本落盘）；
+- `npm test` **24 套 / 1353 项断言**全绿（合并前 23 套 / 1279 项；`TMPDIR=/tmp` 环境）。
+
+**同步说明（fork 约定，见 CONVENTIONS 9.1）**
+
+- 合并上游 `main` 的 2 个提交（`0e5f56b` Issue #29、`1ff63be` Issue #31/#32）。版本号与 tag 不跟随：
+  上游标为 v1.1.2 / v1.1.3 的小节内容全部并入本节，本地 `package.json` 保持 1.1.2（发版另行确认）。
+- 重复功能保留本地实现：插件安装保留本地通用 `ensureBundledPlugin` 骨架并接入上游 vendor 机制
+  （上游的 5 参专用版未采纳）；重启提示走本地 `notifyDshPluginsChanged()`（文案吸收上游新增信息）；
+  e2e 会话游标保留本地 dsh 0.2.2 新语义（省略 `throughSeq` 直读 `cursor`），未采纳上游的越界探测写法；
+  插件版本线保留本地（0.2.9，不回到上游 0.2.0）。
+
 ## 1.1.2
 
 **Copilot 桥接（修复）**

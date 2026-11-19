@@ -5,7 +5,8 @@
 
 ## 职责
 
-DSH 把对话里的工作区路径渲染成 `<button class="_fileLink_xxx">`，点击默认在 DSH 右侧边栏打开。
+DSH 把对话里的工作区路径渲染成 `<button class="_fileLink_xxx">`（部分渲染分支是普通
+`<a href>`），点击默认在 DSH 右侧边栏打开。
 当 DSH 页面被本扩展以跨源 iframe 内嵌时，本插件把这次点击改为「在 VS Code 资源管理器中定位/打开」：
 
 ```
@@ -26,8 +27,9 @@ DSH 把对话里的工作区路径渲染成 `<button class="_fileLink_xxx">`，�
 
 1. **三条底线不可破**：① 只在宿主导握手 `ack` 后接管；② 宿主回执成功才吞点击，否则
    `replayClick()` 回放（绝不「点了没反应」）；③ 带 `Ctrl/Cmd/Shift/Alt` 的点击一律不接管。
-2. **只碰文件链接按钮**：`closest('button')` + class 含 `fileLink`；不改写 DOM、不接管其它点击、
-   不影响 React 委托 handler 之外的监听器。
+2. **只碰文件链接**：`closest('button')` + class 含 `fileLink`；以及本地路径形状的
+   普通 `<a href>`（`anchorTargetPath` 过滤——外部链接、`#锚点`、非本地 scheme 一律返回空串
+   即不接管，Issue #32）。不改写 DOM、不接管其它点击、不影响 React 委托 handler 之外的监听器。
 3. **浏览器兼容**：`lib/client.js` 保持 ES5 风格（`var`、`function`、无箭头函数/可选链），
    因为它在 DSH 页面上下文执行，运行环境由 DSH 前端决定。
 4. **无依赖**：不 import 任何包，只用 `window` / `document` / `navigator`。
@@ -64,6 +66,8 @@ npm run test:one -- file-link
 
 - 插件以**真实文件**随 `.vsix` 分发（`fileLinkPluginFiles()` 读盘再写入 DSH profile），
   因此 `dsh-plugins/` 不能加入 `.vscodeignore`。
-- 不要写入 `dependencies`：npm 上没有该包，写进去会让用户后续 `dsh plugin add` / pnpm 解析失败；
-  只登记 `dsh.profile.bundles`。
+- `dependencies` 里只允许一条 **`file:./vendor/<name>` 声明**（Issue #31，由
+  `ensureBundledPlugin` 写入 profile，不是本插件自己的 package.json）：pnpm 据此把插件当正常依赖
+  保留，不会当 extraneous 清进 `node_modules/.ignored`。**不要**写 npm 版本范围——npm 上没有该包，
+  写进去会让用户后续 `dsh plugin add` / pnpm 解析失败；`dsh.profile.bundles` 照常登记。
 - `dshPanel.workspaceFileLinkAction = "off"` 时不安装、不更新本插件，页面里也不发 `ack`。

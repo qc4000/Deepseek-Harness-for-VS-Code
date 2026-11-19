@@ -453,7 +453,8 @@ async function settle(env) {
     ok(fs.existsSync(path.join(base, 'lib', 'client.js')) && fs.existsSync(path.join(base, 'cordis.patch.yml')), '插件文件落盘到 web profile');
     const pkg = JSON.parse(fs.readFileSync(path.join(profile, 'package.json'), 'utf8'));
     ok((pkg.dsh.profile.bundles || []).includes(PLUGIN), '登记到 dsh.profile.bundles');
-    ok(!pkg.dependencies || !pkg.dependencies[PLUGIN], '不写入 dependencies（npm 上没有该包）');
+    ok(pkg.dependencies && pkg.dependencies[PLUGIN] === 'file:./vendor/' + PLUGIN, '以 file:./vendor/<name> 声明依赖（Issue #31：防 pnpm 当 extraneous 清理）');
+    ok(fs.existsSync(path.join(profile, 'vendor', PLUGIN, 'package.json')), 'vendor 副本同样落盘（pnpm 保留的稳定位置）');
     ok((await I.ensureWorkspacePlugin(profile)) === false, '版本一致 → 幂等（不重复写盘）');
   }
 

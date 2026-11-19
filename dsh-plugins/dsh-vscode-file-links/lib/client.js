@@ -6,6 +6,10 @@
 // 当 DSH 页面被 Deepseek-Harness-for-VS-Code 扩展以跨源 iframe 内嵌时，
 // 我们希望这次点击改为「在 VS Code 资源管理器中定位并打开」。
 //
+// v0.2.9 起额外处理普通 <a href> 链接（Issue #32 的建议）：某些 DSH 版本/渲染
+// 分支会把本地路径渲染成 <a> 而不是 button.fileLink；对「本地路径形状」的 href
+// 同样先交给宿主解析，宿主拒绝时回放原始点击，保持 DSH/浏览器默认行为。
+//
 // 链路：本插件捕获点击 → window.parent.postMessage → webview 中继 → 扩展宿主
 //       → revealInExplorer / 打开文件（或变更 diff）→ 回执沿原路返回。
 //
@@ -29,7 +33,7 @@ window.__ModuleLoader__.load({ id: 'dsh-vscode-file-links', factory: (require) =
   var module = { exports: {} }
   var exports = module.exports
 
-  var PLUGIN_VERSION = '0.2.8'
+  var PLUGIN_VERSION = '0.2.9'
   // 父级 webview（VS Code 扩展）的身份标记：iframe name 属性 + 消息 source 字段。
   var HOST_ID = 'dsh-vscode-host'
   var SELF_ID = 'dsh-vscode-file-links'
@@ -142,6 +146,29 @@ window.__ModuleLoader__.load({ id: 'dsh-vscode-file-links', factory: (require) =
 
   function nextToken() {
     return 'r' + Date.now().toString(36) + Math.random().toString(36).slice(2, 8)
+  }
+
+  /** 事件目标是否为普通 <a href> 链接（Issue #32：某些渲染分支用 anchor）。 */
+  function fileLinkAnchorOf(node) {
+    if (!node || typeof node.closest !== 'function') return null
+    return node.closest('a[href]')
+  }
+
+  /**
+   * 从 anchor 的 href 里取「本地路径」形状；外部链接/锚点/其它 scheme 返回空串
+   * （不接管，保持 DSH 与浏览器默认行为）。
+   * @param {any} anchor
+   * @returns {string}
+   */
+  function anchorTargetPath(anchor) {
+    var href = anchor.getAttribute('href')
+    if (typeof href !== 'string') return ''
+    var v = href.trim()
+    if (v === '' || v.charAt(0) === '#') return ''
+    // Windows 盘符（D:/、D:\）是路径；其它 scheme（http:、mailto:、data:、file:、javascript:）一律不管。
+    if (!/^[a-z]:[\\/]/i.test(v) && /^[a-z][a-z0-9+.-]*:/i.test(v)) return ''
+    if (!looksLikePath(v)) return ''
+    return v
   }
 
   /**
@@ -381,14 +408,26 @@ window.__ModuleLoader__.load({ id: 'dsh-vscode-file-links', factory: (require) =
     // 修饰键点击 = 用户明确要求走 DSH 自身行为（在 DSH 侧边栏打开）。
     if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return
     var button = fileLinkButtonOf(event.target)
-    if (!button) return
-    var path = pathOfButton(button)
-    if (path === '') return
-    // 先吞掉这次点击（阻止 React 的委托 handler 调用 DSH 的 openFile），
-    // 再由宿主回执决定是否回放；其它 DOM 监听器不受影响。
+    if (button) {
+      var path = pathOfButton(button)
+      if (path === '') return
+      // 先吞掉这次点击（阻止 React 的委托 handler 调用 DSH 的 openFile），
+      // 再由宿主回执决定是否回放；其它 DOM 监听器不受影响。
+      event.preventDefault()
+      event.stopPropagation()
+      requestReveal(button, path, coordsOf(button))
+      return
+    }
+    // Issue #32：普通 <a href> 形式的工作区文件链接（本地路径形状才接管）。
+    var anchor = fileLinkAnchorOf(event.target)
+    if (!anchor) return
+    var anchorPath = anchorTargetPath(anchor)
+    if (anchorPath === '') return
     event.preventDefault()
     event.stopPropagation()
-    requestReveal(button, path, coordsOf(button))
+    // anchor 同样走轮级坐标（diff 模式）：轮标记在消息节点祖先上，取不到就为 null，
+    // 宿主按无坐标回退 HEAD 对比——与 button 分支同一套语义（规格 013）。
+    requestReveal(anchor, anchorPath, coordsOf(anchor))
   }
   
   function onHostMessage(event) {
@@ -457,6 +496,8 @@ window.__ModuleLoader__.load({ id: 'dsh-vscode-file-links', factory: (require) =
       hostHint: hostHinted(),
       diffMode: function () { return diffMode },
       acked: function () { return acked },
+      // Issue #32 起本插件同时接管 <a href> 形式的本地路径链接（排障用标记）。
+      anchors: true,
       cwd: function () { return currentSessionCwd() },
       log: function () { return trace.slice() },
       clear: function () { trace = [] }

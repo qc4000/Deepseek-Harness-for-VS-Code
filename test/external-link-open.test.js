@@ -10,7 +10,7 @@
  *  4) simpleBrowser.show 失败 → 状态栏提示一次 + 回退系统浏览器
  *  5) openExternal 返回 false → 可见提示（只一次）
  *  6) 真远程 + 回环 + vscodeBrowser → 先 asExternalUri
- *  7) package.json 配置项；插件 0.2.0 落盘 / 幂等 / 不写 dependencies
+ *  7) package.json 配置项；插件 0.2.0 落盘 / 幂等 / vendor 依赖声明
  */
 const assert = require('assert');
 const path = require('path');
@@ -251,7 +251,7 @@ function statusCount(fragment) {
     ok(typeof prop.markdownDescription === 'string' && prop.markdownDescription.indexOf('window.open') >= 0, '说明 off 不影响 window.open 登录链路');
   }
 
-  console.log('[8] 插件 0.2.0 安装 / 幂等 / 不写 dependencies');
+  console.log('[8] 插件 0.2.0 安装 / 幂等 / vendor 依赖声明');
   {
     const profile = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-external-link-'));
     const first = await I.ensureOpenExternalPlugin(profile);
@@ -260,7 +260,8 @@ function statusCount(fragment) {
     ok(installedPkg.version === '0.2.0', '落盘版本 0.2.0');
     const profilePkg = JSON.parse(fs.readFileSync(path.join(profile, 'package.json'), 'utf8'));
     ok(profilePkg.dsh.profile.bundles.includes('dsh-vscode-open-external'), '登记到 dsh.profile.bundles');
-    ok(!profilePkg.dependencies || !profilePkg.dependencies['dsh-vscode-open-external'], '不写 dependencies');
+    ok(profilePkg.dependencies && profilePkg.dependencies['dsh-vscode-open-external'] === 'file:./vendor/dsh-vscode-open-external', '以 file:./vendor/<name> 声明依赖（Issue #31：防 pnpm 当 extraneous 清理）');
+    ok(fs.existsSync(path.join(profile, 'vendor', 'dsh-vscode-open-external', 'package.json')), 'vendor 副本同样落盘（pnpm 保留的稳定位置）');
     const second = await I.ensureOpenExternalPlugin(profile);
     ok(second === false, '版本一致时幂等');
     const check = spawnSync(process.execPath, ['--check', path.join(profile, 'node_modules', 'dsh-vscode-open-external', 'lib', 'client.js')], { encoding: 'utf8' });

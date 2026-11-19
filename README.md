@@ -30,7 +30,17 @@
 
   或在 VS Code 中：`Ctrl+Shift+P` → `Extensions: Install from VSIX...`。
 
-安装后 `Ctrl+Shift+P` → `Reload Window`。打开面板时扩展会自动检测并启动 DSH（未安装会提示并代为执行 `npm install -g @deepseek-ai/dsh`）。
+安装后 `Ctrl+Shift+P` → `Reload Window`。打开面板时扩展会自动检测并启动 DSH（未安装会提示并代为执行 `npm install -g @deepseek-ai/dsh`）；如果装的是**官网 Windows 桌面版**，扩展会直接用它自带的内置 CLI 启动，**不需要 npm / Node**（见下节）。
+
+### 官网 Windows 桌面版（自动支持）
+
+从 [官网](https://deepseek.com) 下载安装的 **DeepSeek Harness Windows 桌面版**是 Electron 应用，DSH 运行时内嵌在 `app.asar` 里、`dsh` 也不在 PATH 上，所以早期版本会把它误判成「未安装」。现在扩展会自动识别：
+
+- **安装位置**：优先读注册表卸载项的 `InstallLocation`（`HKCU\Software\Microsoft\Windows\CurrentVersion\Uninstall`，兼容机器级安装；**支持自定义安装目录**，如 `E:\DSH`——先按卸载项找到命中子键，再逐个子键读 `InstallLocation`，缺失时从 `DisplayIcon` / `UninstallString` 反推），再兜底常见的 `%LOCALAPPDATA%\Programs\DeepSeek Harness` 等目录；
+- **启动方式**：用桌面版自带的内置 CLI `<安装目录>\resources\runtime\cli\bin\dsh.cmd` 起一个 `dsh web` 实例（默认端口仍是 `dshPanel.port` = 3080），走的仍是 **web profile**——扩展的全部配套插件（`dsh-drop-caret`、剪贴板、文件链接、布局/工作区/快捷键/外链等）照常安装并生效；
+- **认证**：桌面版 CLI 打印的启动链接里同样带令牌，扩展受管认证代理照旧无感完成浏览器认证；
+- **与桌面 App 的关系**：桌面 App 自己的后端固定为 `127.0.0.1:19387` + `desktop` profile，且带浏览器认证（令牌只经 Electron IPC 下发，外部无法复用），因此面板**不接管**桌面 App 正在运行的那个实例，而是用同一个 `~/.dsh` 起一个独立的 web 实例：**会话与凭据共享，插件/界面设置各自独立**——同一个会话在 App 与 VS Code 面板里都能看到；
+- **检测顺序**：`dshPanel.dshCommand`（或 PATH 上的 `dsh`）→ 桌面版内置 CLI → `npx` 缓存；也可把 `dshPanel.dshCommand` 直接填成内置 CLI 的完整路径来强制指定。
 
 ---
 
@@ -47,6 +57,7 @@
   - **macOS 快捷键**：⌘C/⌘V/⌘X 在跨源 iframe 内嵌时原生默认动作不会发生，插件拦截三键并经 `execCommand` 显式执行；仅 macOS + 被内嵌时启用。
 - **点击对话里的工作区文件/文件夹链接 → 在 VS Code 资源管理器中定位并打开（自动安装配套插件 `dsh-vscode-file-links`，v0.8.46 起）**：模型回答里的 `src/a.ts`、`docs/` 这类工作区相对路径链接，原本点击后会在 DSH 侧边栏打开；现在在面板内点击会改为在本窗口的**资源管理器**中定位并打开（文件同时打开编辑器，文件夹仅定位）。**前提**：目标必须位于当前 VS Code 打开的工作区内且真实存在——不满足时自动回落到原来的 DSH 侧边栏行为，绝不出现「点了没反应」。详见下文专节。
 - **隐藏 DSH 左侧栏（v1.0.1 起）**：面板顶部工具条上的按钮可在「隐藏 / 显示 DSH 左侧栏」之间切换，窄面板（<1024px，如侧边栏、底部面板）默认隐藏，让对话区占满宽度；隐藏只靠父容器视口裁剪实现，**不往 DSH 页面里注入任何东西**。详见下文专节。
+- **配套插件防静默清理**：内置插件同时写入 profile 的 `vendor/` 与 `node_modules/` 两份副本，并在 profile `package.json` 里声明 `file:./vendor/<name>` 依赖——`dsh plugin` 的 pnpm 不会再把它们当多余包清进 `.ignored` 导致文件链接/剪贴板/外链桥悄悄失效；任一侧缺失或版本不符都会在打开面板时自动重建，并提示「重启 dsh web」。
 - **官网 Windows 桌面版启动**：自动从注册表 / 常见默认目录定位桌面版内置 CLI，按 `dshPanel.dshCommand` → 桌面版 CLI → `npx` 的顺序启动，不需要 PATH / npm / Node；桌面版起的实例仍是 web profile，会话与凭据共享（同一个 `~/.dsh`）。
 - **Remote-SSH / Dev Containers 受管认证代理**：真远程下按「`dshPanel.url` 是否回环」判定代理可用，面板经 `asExternalUri` 转发加载；远程模式只放行已转发 authority 的请求，扩展自身请求带一次性密钥头。新增 `dshPanel.remoteAuthProxy`（默认 `true`），多用户共享服务器建议关闭。
 - **面板内外链改用系统浏览器或 VS Code 内置浏览器（自动安装配套插件 `dsh-vscode-open-external`，0.2.0 起）**：VS Code webview 的 sandbox 没有 `allow-popups`，DSH 页面里的 `<a target="_blank">`、Ctrl/Cmd/Shift+点击、中键以前「点了没反应」。插件在页面内只识别**新窗口/新标签意图**，经 webview 中继交给宿主，按 `dshPanel.externalLinkAction` 用系统浏览器或 VS Code 内置浏览器（Simple Browser / 浏览器视图）打开；DSH 自己接管的点击（聊天「在侧栏打开」）不受影响，登录授权页固定系统浏览器。`dshPanel.installOpenExternalPlugin`（默认 `true`）可整体关闭安装；只想关 `<a>` 点击桥请用 `dshPanel.externalLinkAction=off`。
@@ -83,7 +94,7 @@
 | `dshPanel.installOpenExternalPlugin` | `true` | 自动安装内置 `dsh-vscode-open-external` 插件（外链/登录桥）：面板内 `window.open`（典型：DeepSeek 账号登录授权页）与 `<a>` 新窗口/新标签点击交给宿主。关闭后插件不安装/不更新；只想关 `<a>` 点击桥请用 `dshPanel.externalLinkAction=off` |
 | `dshPanel.externalLinkAction` | `systemBrowser` | 面板内 `<a target="_blank">` / Ctrl/Cmd/Shift+点击 / 中键外链的打开方式：`systemBrowser` 系统默认浏览器（Remote-WSL / Remote-SSH 下由客户端打开）/ `vscodeBrowser` VS Code 内置浏览器（Simple Browser / 浏览器视图）/ `off` 不接管（保持 DSH 当前行为；`window.open` 登录/新标签链路不变）。DSH 自己接管的点击（聊天「在侧栏打开」）与 `target="_self"` 不受影响；修改即时生效，不重载面板 |
 | `dshPanel.remoteAuthProxy` | `true` | Remote-SSH / Dev Containers 等真远程窗口下是否启用受管认证代理（默认启用）；代理只监听服务器回环，多用户共享服务器建议关闭，关闭后面板会给出浏览器认证引导 |
-| `dshPanel.workspaceFileLinkAction` | `revealAndOpen` | 对话里工作区文件/文件夹链接的点击行为：`revealAndOpen` 资源管理器定位并打开 / `diffAndOpen` 定位 + 展示变更（并排 diff，工作区外的文件也能看该轮变更，见下节）/ `revealOnly` 仅定位 / `off` 不接管（保持 DSH 侧边栏打开，也不安装配套插件） |
+| `dshPanel.workspaceFileLinkAction` | `revealAndOpen` | 对话里工作区文件/文件夹链接的点击行为（同时覆盖 `button.fileLink` 按钮与普通 `<a href>` 本地路径链接）：`revealAndOpen` 资源管理器定位并打开 / `diffAndOpen` 定位 + 展示变更（并排 diff，工作区外的文件也能看该轮变更，见下节）/ `revealOnly` 仅定位 / `off` 不接管（保持 DSH 侧边栏打开，也不安装配套插件） |
 | `dshPanel.outOfWorkspaceFileAccess` | `false` | 是否把**工作区外**文件也交给 VS Code。默认 `false`（工作区外链接取不到轮级记录时保持 DSH 侧栏打开）。DSH 的轮级变更记录只在进程内存，**重启 dsh web 后旧轮次就没有数据**；开启后按「轮级 → 与 git `HEAD` 的差异 → 直接打开」降级，等价于把模型给的任意路径交给编辑器，请自行权衡 |
 | `dshPanel.dshSidebar` | `auto` | DSH 左侧栏显示策略：`auto` 窄面板（<1024px）自动隐藏、宽面板显示 / `show` 始终显示（等同关闭本能力）/ `hide` 始终隐藏；顶部工具条可随时手动切换，修改本配置会清除手动切换 |
 | `dshPanel.debugLogToFile` | `false` | **把调试日志写入文件**（默认关闭）：开启后侧栏诊断（页面侧 + 面板侧时间线）、手动显示/隐藏、策略变更、插件安装变化等事件追加到本扩展的全局存储目录 `<globalStorage>/logs/dsh-vscode-debug.log`（便携版即 `data/user-data/User/globalStorage/vithrive.deepseek-harness-vscode/logs/`；从旧版本升级会把 `~/.dsh-debug` 的历史日志复制一次），超过 2MB 自动轮转为 `.log.1`（只留一份）。落盘前统一脱敏（不含 token/对话内容）。排查完记得关掉；用命令「DeepSeek Harness: 打开调试日志」可直接打开该文件 |
@@ -173,7 +184,10 @@ DSH 被以跨源 iframe 嵌进 VS Code webview 时，webview 的 sandbox 不允�
 ### 点击对话里的文件/文件夹链接 → 在 VS Code 资源管理器中定位（v0.8.46 起）
 
 模型回答里的工作区路径链接（指向 `src/a.ts`、`docs/` 这类路径的 Markdown 链接）在 DSH 里是
-可点击的：DSH 会把它们打开在自己的右侧边栏。本扩展在面板内把这一点击改接到 VS Code：
+可点击的：DSH 会把它们打开在自己的右侧边栏。本扩展在面板内把这一点击改接到 VS Code。
+除 DSH 渲染的 `button.fileLink` 按钮外，插件也接管普通 **`<a href>` 形式**的本地路径链接
+（相对路径、`./` 前缀、盘符绝对路径）——外部链接、`#锚点`、`mailto:` / `file:` / `javascript:`
+等 scheme 一律不接管：
 
 | 场景 | 行为 |
 | --- | --- |
@@ -185,8 +199,9 @@ DSH 被以跨源 iframe 嵌进 VS Code webview 时，webview 的 sandbox 不允�
 
 实现方式与「忠实窗口」原则的边界：
 
-- 由内置插件 `dsh-vscode-file-links` 在 DSH 页面内**只监听**「文件链接按钮」的点击
-  （DSH 的 `MarkdownFileLink` 按钮，`title` 就是链接目标路径），其余 DOM 一律不碰；
+- 由内置插件 `dsh-vscode-file-links` 在 DSH 页面内**只监听**「文件链接」的点击
+  （DSH 的 `MarkdownFileLink` 按钮，`title` 就是链接目标路径；以及本地路径形状的
+  普通 `<a href>`），其余 DOM 一律不碰；
 - 点击路径经 `postMessage` 逐级转发：DSH 页面 → webview → 扩展宿主；扩展宿主解析路径
   （相对路径对每个工作区文件夹依次尝试，绝对路径与 `../` 越界一律拒绝）并执行
   `revealInExplorer` / `vscode.open`，再把结果回执原路返回；
@@ -458,7 +473,7 @@ code --install-extension deepseek-harness-vscode-<版本>.vsix
 ### 开发与测试
 
 ```bash
-npm test                    # 语法检查 + 12 套离线单测（343 项断言，无需 npm install）
+npm test                    # 语法检查 + 24 套离线单测（1353 项断言，无需 npm install）
 npm run test:one -- file-link   # 只跑文件名含该子串的套件
 npm run test:all            # 追加真实 dsh 端到端（需本机已安装 dsh）
 npm run package             # 打包 .vsix
