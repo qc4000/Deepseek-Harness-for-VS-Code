@@ -57,6 +57,9 @@ Node ≥ 18。无 `npm install`、无编译：`extension.js` 就是产物。
 - 验证：`npm test`（涉及 dsh 契约再 `npm run test:all`），结论写回 spec 的「验证记录」。
 - 发布：`package.json` 版本 + `CHANGELOG.md` + 必要时 `README.md`，打 tag `v<版本>`。
 - 轻量例外：纯文档/注释/无行为变化的重构（须说明依据）。
+- **同步上游 fork 仓库**：先试合并探冲突，逐块对比并**罗列全部异同点**（新增 / 重复的取舍——
+  本地实现更好就按本地的来 / 移除改写 / 冲突处理方向），**合并范围经开发者确认后才动手，
+  不得自动合并**（详见 [CONVENTIONS 9.1](docs/CONVENTIONS.md#91-同步上游原始仓库fork-工作流)）。
 
 ## 7. 提交与 PR
 
