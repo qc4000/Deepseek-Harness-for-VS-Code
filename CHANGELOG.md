@@ -67,6 +67,19 @@
   断言改为新契约（`file:./vendor/<name>` + vendor 副本落盘）；
 - `npm test` **24 套 / 1353 项断言**全绿（合并前 23 套 / 1279 项；`TMPDIR=/tmp` 环境）。
 
+**打包**
+
+- **三档打包脚本 `scripts/package.js`**：`npm run package:debug`（调试版 `X.Y.Z-dev.N`，N 取 `out/` 里
+  同 base 同族最大值 +1，每次重打包自动递增）/ `npm run package:rc`（候选/预览版 `X.Y.Z-rc.N`）/
+  `npm run package`（= `package:release`，正式版 `X.Y.Z`；package.json 带预发布会被拒绝并提示先定稿）。
+  **候选版可传显式基版本**：`npm run package:rc -- 1.1.3` 不改 `package.json` 就能为下一版打 rc 包
+  （N 仍按 `out/` 里同 base 同族递增，与当前版本不同时打印 ℹ️ 说明；release 不收该参数，版本必须先
+  写进 `package.json`）。**预防性警告**：debug/rc 打包前查 `git tag -l vX.Y.Z`，基版本已有正式 tag
+  就打印 ⚠️ 说明「再打预发布会低于已发布版本」并指路 `npm run package:rc -- <下一版>`（只警告不拦截，
+  没装 git / 非 git 仓库时不打扰）。产物默认进 `out/`（`.gitignore` 与 `.vscodeignore` 均已忽略，历史 vsix 不会打进新包）；
+  脚本只在打包期间临时改写 `version`，**无论成败都逐字节恢复**；预发布包不打 tag、不进 Release；
+  只读 HOME / 只读 tmpdir 的沙箱里 npx 缓存自动兜底到可写目录。配套 `test/packaging.test.js`（54 断言）。
+
 **文档**
 
 - 记录同步上游 fork 仓库的强制流程（CONVENTIONS 9.1 + AGENTS 6）：先试合并探冲突，逐块对比并

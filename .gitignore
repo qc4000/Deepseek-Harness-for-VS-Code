@@ -9,3 +9,5 @@ node_modules/
 # 项目级 skill 要入库：DSH 扫描 <项目根>/.dsh/skills（rank 100）。
 !.dsh/skills/
 .dsh-debug/
+# 打包产物（scripts/package.js 默认输出目录；*.vsix 也在 .gitignore 里兜底）
+out/

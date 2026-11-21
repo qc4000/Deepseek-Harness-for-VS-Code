@@ -70,7 +70,8 @@
 - [x] `[test]` `npm run test:all`（真实 dsh 0.2.2-rc.1 e2e）：**26 套 / 1494 项断言**
       （本会话 `HOME` 只读，需 `DSH_HOME=/tmp/… HOME=/tmp/…` 才能跑）
 - [x] `[docs]` `docs/TESTING.md` 测试地图补 `bilingual-ui.test.js`（117 断言）+ `workspace-pin` 74→98
-- [x] `[docs]` `AGENTS.md` / `docs/TESTING.md` / `README.md` 命令说明改 25 套 / 1480 断言
+- [x] `[docs]` `AGENTS.md` / `docs/TESTING.md` / `README.md` 命令说明同步（计数随套件增减持续更新；
+      本规格完成时为 25 套 / 1494 断言，现为 26 套 / 1530 断言——多出的 `packaging.test.js` 属打包脚本）
 - [x] `[docs]` `AGENTS.md` §4 与 `docs/CONVENTIONS.md` 改为「用户文案中英双语」约定
 - [x] `[docs]` README 补 `dshPanel.locale` 表行 + 双语说明段；CHANGELOG 待发 1.1.3 下新增小节
 - [x] `[docs]` spec 023 置 `implemented`，验证记录补全（含 AC→断言映射）

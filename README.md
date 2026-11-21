@@ -471,17 +471,22 @@ code Deepseek-Harness-for-VS-Code
 在 VS Code 中按 `F5` 打开扩展开发宿主窗口，在其中打开你的项目文件夹即可。自行打包安装：
 
 ```bash
-npx --yes @vscode/vsce package --allow-missing-repository
-code --install-extension deepseek-harness-vscode-<版本>.vsix
+npm run package                 # 正式版 → out/deepseek-harness-vscode-<版本>.vsix
+npm run package:debug           # 调试版 X.Y.Z-dev.N → out/（每次重打包 N 自动 +1）
+npm run package:rc              # 候选/预览版 X.Y.Z-rc.N → out/；可传基版本：npm run package:rc -- 1.1.3
+code --install-extension out/deepseek-harness-vscode-<版本>.vsix
 ```
+
+预发布包（debug / rc）只用来装来自测：**不打 tag、不进 Release**（`v*` 会触发正式发布工作流）。
 
 ### 开发与测试
 
 ```bash
-npm test                    # 语法检查 + 25 套离线单测（1494 项断言，无需 npm install）
+npm test                    # 语法检查 + 26 套离线单测（1548 项断言，无需 npm install）
 npm run test:one -- file-link   # 只跑文件名含该子串的套件
 npm run test:all            # 追加真实 dsh 端到端（需本机已安装 dsh）
-npm run package             # 打包 .vsix
+npm run package             # 打正式版 .vsix → out/（= package:release）
+npm run package:debug       # 调试版 X.Y.Z-dev.N → out/；package:rc 候选版（-- 1.1.3 可指定基版本）
 ```
 
 贡献流程采用 **SDD（规格驱动）+ TDD**：行为变更先写 `docs/sdd/specs/NNN-*/spec.md`，

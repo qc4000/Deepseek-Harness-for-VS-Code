@@ -35,10 +35,12 @@
 
 ```bash
 npm test                      # 等同 CI 的 test 任务（不跑 e2e）
-npm run package               # 等同 CI 的打包步骤，产物在当前目录
-# 校验包内容（与 CI 一致）
-unzip -l deepseek-harness-vscode-*.vsix | grep -E 'extension/(docs|test|scripts|\.github)/' ; echo "上面应无输出"
-unzip -l deepseek-harness-vscode-*.vsix | grep 'dsh-plugins/dsh-vscode-file-links/lib/client.js'
+npm run package               # 正式版打包 → out/deepseek-harness-vscode-<版本>.vsix
+npm run package:debug         # 调试版 X.Y.Z-dev.N → out/（候选版：npm run package:rc）
+npm run package:rc -- 1.1.3   # 候选版显式基版本：不改 package.json 就能为下一版打 rc 包
+# 校验包内容（与 CI 一致；CI/Release 工作流直接调 npx、产物在仓库根，本地脚本默认 out/）
+unzip -l out/deepseek-harness-vscode-*.vsix | grep -E 'extension/(docs|test|scripts|\.github)/' ; echo "上面应无输出"
+unzip -l out/deepseek-harness-vscode-*.vsix | grep 'dsh-plugins/dsh-vscode-file-links/lib/client.js'
 ```
 
 Windows 本地验证包内容可用 `tar -tf`（Windows 10+ 自带 bsdtar）或解压后查看。
@@ -72,8 +74,9 @@ Windows 本地验证包内容可用 `tar -tf`（Windows 10+ 自带 bsdtar）或�
 8. **发布后验证**：下载 Release 里的 `.vsix`，`code --install-extension <file>` ，
    打开面板确认能启动 dsh、Copilot 模型选择器出现 DSH 条目。
 
-> 手动发布（不经 Actions）也可：`npm run package` → `code --install-extension <vsix>` 自测 →
-> `npx --yes @vscode/vsce publish`（需 `VSCE_PAT`）。
+> 手动发布（不经 Actions）也可：`npm run package` → `code --install-extension out/<vsix>` 自测 →
+> `npx --yes @vscode/vsce publish --packagePath out/<vsix>`（需 `VSCE_PAT`）。
+> 预发布验证包（`package:debug` / `package:rc`）只装来自测，**不 publish、不打 tag**。
 
 ## 5. 密钥与权限
 

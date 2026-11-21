@@ -22,7 +22,10 @@
     "test:all": "node scripts/run-tests.js --e2e",
     "test:one": "node scripts/run-tests.js --only",
     "test:verbose": "node scripts/run-tests.js --verbose",
-    "package": "npx --yes @vscode/vsce package --allow-missing-repository"
+    "package": "node scripts/package.js release",
+    "package:debug": "node scripts/package.js debug",
+    "package:rc": "node scripts/package.js rc",
+    "package:release": "node scripts/package.js release"
   },
   "extensionKind": [
     "workspace"

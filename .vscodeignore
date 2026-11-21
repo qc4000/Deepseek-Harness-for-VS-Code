@@ -20,3 +20,5 @@ scripts/**
 tmp.py
 # 解包过的 vsix 目录（形如 deepseek-harness-vscode-<版本>/）：残留会整包被打进去
 deepseek-harness-vscode-*/
+# 打包产物目录：历史 vsix 不能被打进新包
+out/**

@@ -7,7 +7,7 @@
 ## 1. 命令
 
 ```bash
-npm test                      # 语法检查 + 25 套离线单测（1494 项断言）
+npm test                      # 语法检查 + 26 套离线单测（1548 项断言）
 npm run test:one -- file-link # 只跑文件名含 file-link 的套件（TDD 内循环）
 npm run test:verbose          # 逐套件完整输出（看每个 ✓/✗）
 npm run test:all              # 追加真实 dsh e2e（需本机已安装 dsh）
@@ -73,6 +73,7 @@ CI 只认退出码，不看输出格式。
 | `macos-keysim.test.js` | 24 | macOS UA 下逐键行为与 IME/修饰键过滤；Windows 与非 iframe 场景完全不激活 |
 | `remote-mode.test.js` | 34 | 重写（上游）：URL-only 回环判定、`needsPortForwarding` 分类、远程受管认证代理开关与实例重建、转发失败的可读错误 |
 | `remote-auth-proxy.test.js` | 28 | 真远程受管认证代理（上游）：真实 TCP 转发器模拟 VS Code 端口转发；客户端 authority 的 Cookie 换发、远程 403 拦截、扩展侧 `/api` 密钥头、浏览器打开地址转发、面板 CSP 与 `asExternalUri` 失败报错 |
+| `packaging.test.js` | 54 | 打包脚本（`scripts/package.js`）：版本命名 `X.Y.Z-dev.N` / `-rc.N` / `X.Y.Z` 与 N 递增（`out/` 同 base 同族最大值、`package.json` 自身同族 N 一并参与、取大 +1；dev/rc 两族独立）、**显式基版本**（debug/rc 可传 `X.Y.Z`：不看 `package.json`、传带预发布号的版本取其基、同 base 时自身 N 仍参与、release 忽略它）、正式版拒绝预发布号且**不调 vsce 不改文件**、`out/` 扫描只认同 base 同族（换 base / 换族不串）、参数解析（默认 `out/` + `--out` + 显式版本 + 5 类错误输入：缺模式/未知模式/形态非法/多余参数/正式版收参数）、打包期间临时改版本后**四条路径（成功 / vsce 失败 / runner 抛异常 / 未产出文件）都逐字节恢复 `package.json`**、显式基版本端到端（`1.1.3-rc.1` → `rc.2` 递增 + 打包期间确实写成目标版本）、**预防性警告**（`releaseTagWarning`：已有 `vX.Y.Z` tag → 警告并指路传基版本、无 tag / 非 git 仓库 / 无 git → 不打扰；`main` 层打印在打包前且**不拦截**、release 模式不给该警告、警告路径下仍逐字节恢复）、产物路径 `<out>/<name>-<version>.vsix`、`.gitignore`/`.vscodeignore` 忽略 `out/`、npm scripts 接线、npx 缓存兜底（只读 HOME / 只读 tmpdir 沙箱：**真写探针**判断可用性，`accessSync(W_OK)` 认不出只读挂载） |
 | `open-external-plugin.test.js` | 107 | 远端登录/外链插件：插件文件/声明完整性；0.2.0 click/auxclick 桥（`_blank` 普通左键让 DSH 先处理、DSH `preventDefault` 让位、`stopPropagation` 仍转交、修饰键/中键立即接管、`_self`/同源/download/非 http(s)/超长不碰、macOS Ctrl+click 不抢右键、去重、卸载清理）；`window.open` 登录桩与 `kind=login/popup/link`；webview 中继（ack `externalLinks`、kind 白名单、`dsh-external-links-config` 热更新、off 仍可登录） |
 | `external-link-open.test.js` | 52 | 外链宿主路由（spec 014）：`dshPanel.externalLinkAction` 默认/三值/非法回退；`parseHttpUrl` 只放行 http(s)；`systemBrowser`/`vscodeBrowser`/`off`/login/popup 分支；`simpleBrowser.show` 失败提示一次 + 回退系统浏览器；`openExternal=false` 可见提示；真远程回环 `asExternalUri`；插件 0.2.0 落盘/幂等、`file:./vendor/<name>` 依赖声明与 vendor 副本 |
 | `desktop-app-support.test.js` | 62 | 官网 Windows 桌面版（上游）：安装目录定位（注册表 InstallLocation / 默认目录）、**自定义目录复现（Issue #29：`/f … /d` 输出无 InstallLocation）、卸载项子键提取与逐条读取、`DisplayIcon` / `UninstallString` 反推、含空格子键加引号、`REG_EXPAND_SZ` 展开、注入式 `probeDesktopDshCli`（run/exists/env/force）命中**、启动优先级（PATH → 桌面版 CLI → npx）、含空格路径的 cmd.exe 引号、源码级接线；`DESKTOP_CLI_REL` 用 win32 语义，Linux CI 同样可测 |

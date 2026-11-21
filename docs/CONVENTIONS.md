@@ -115,12 +115,34 @@
 - **发版需维护者确认**：修改 `package.json` 版本号、提交版本变更、打 tag、push、打包交付均需先征得确认；
   代理/贡献者不得自行发版（本地验证、测试与文档修改不受限）。
 - 语义化版本：行为变更 `MINOR`，修复 `PATCH`，不兼容变更 `MAJOR`。
-- **调试/候选包命名**（不打 tag、不进 Release）：临时把 `package.json` 的 `version` 改为
-  semver 预发布号——日常调试 `X.Y.Z-dev.N`（每次重打包递增 `N`），候选验证 `X.Y.Z-rc.N`；
-  用 `npx --yes @vscode/vsce package <版本> --no-git-tag-version --allow-missing-repository`
-  打包。vsix 文件名由 vsce 自动生成（`<name>-<version>.vsix`），**不要手改**；
-  **预发布号一律不打 tag**：`v*` 会触发 Release 工作流并生成正式 Release。验证完用
-  `git checkout -- package.json` 恢复；正式发版仍用 `X.Y.Z` + tag `vX.Y.Z`。
+- **调试/候选/正式包**统一走 `scripts/package.js`（产物默认进 `out/`）：
+
+  ```bash
+  npm run package:debug       # 调试版 X.Y.Z-dev.N → out/（每次重打包 N 自动 +1）
+  npm run package:rc          # 候选/预览版 X.Y.Z-rc.N → out/
+  npm run package:release     # 正式版 X.Y.Z → out/（= npm run package）
+  npm run package:rc -- 1.1.3 # 显式基版本：不改 package.json 也能为下一版打候选包（debug 同理）
+  node scripts/package.js <debug|rc|release> [X.Y.Z] --out <目录>   # 直接调脚本
+  ```
+
+  可选的 `X.Y.Z` **只对 debug/rc 有效**：直接拿它当基版本（传 `1.1.3-rc.7` 也会取其 `1.1.3`），
+  `N` 仍按 `out/` 里同 base 同族的最大值 +1 递增；与 `package.json` 不同会打印一行 ℹ️ 说明
+  「仅打包期间临时改写、已逐字节恢复」。**release 不收版本号参数**——正式版必须先按发版流程
+  写进 `package.json`，否则会绕过「定稿」这道门。
+
+  `N` = max(`out/` 里**同 base 同族**已有 N、`package.json` 当前同族 N) + 1，换 base 后从 1 重新计数；
+  正式版要求 `package.json` 已是 `X.Y.Z`（带预发布会被拒绝并提示先定稿，见 docs/CI-CD.md §4）。
+  **预防性警告**：debug/rc 打包前会查 `git tag -l vX.Y.Z`——基版本已有正式 tag 就打印 ⚠️，
+  说明「再打预发布会低于已发布版本」并指路 `npm run package:rc -- <下一版>`；只警告不拦截
+  （往回打复现旧版是合理的，publish 环节还有 Marketplace 版本校验兜底），
+  没装 git / 非 git 仓库时判断不了就不打扰。
+  脚本只在打包期间临时改写 `version`，**无论成败都逐字节恢复**（不产生 diff）；vsix 名由 vsce 按
+  `<name>-<version>.vsix` 生成，**不要手改**；产物在 `out/`（`.gitignore` 与 `.vscodeignore` 都已忽略，
+  历史 vsix 不会打进新包）。它内部就是 `npx --yes @vscode/vsce package --allow-missing-repository --out <文件>`，
+  只读 HOME 的沙箱会把 npx 缓存兜底到可写目录。
+  **预发布号一律不打 tag**：`v*` 会触发 Release 工作流并生成正式 Release；正式发版仍用 `X.Y.Z` + tag `vX.Y.Z`。
+  **不要绕过脚本直接 `npx @vscode/vsce package`**（唯一例外是 CI/Release 工作流）：那会绕过版本命名与 N 递增、
+  产物目录 `out/`、`package.json` 逐字节恢复，以及「基版本已有正式 tag」的预防性警告。
 - `CHANGELOG.md` 顶部新增版本小节，按「Copilot 桥接 / 忠实窗口（面板）/ 测试」分组，用户视角描述。
 - 提交信息：`<type>: <描述>（v<版本>）`；`type ∈ feat|fix|test|docs|chore|security|merge`。
 - 一次提交只做一组相关改动；「顺手重构」单独提交，并在信息里说明 `chore:`。

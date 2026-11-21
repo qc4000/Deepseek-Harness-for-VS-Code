@@ -14,14 +14,18 @@
 ## 2. 命令
 
 ```bash
-npm test                      # 语法检查 + 25 套离线单测（1494 项断言；无需 npm install）
+npm test                      # 语法检查 + 26 套离线单测（1548 项断言；无需 npm install）
 npm run test:one -- <子串>    # 只跑匹配的套件（TDD 内循环）
 npm run test:all              # 追加真实 dsh e2e（需本机已装 dsh）
-npm run package               # 打 .vsix
+npm run package               # 打正式版 .vsix → out/（= package:release）
+npm run package:debug        # 调试版 X.Y.Z-dev.N → out/（预发布号，不打 tag）
+npm run package:rc           # 候选/预览版 X.Y.Z-rc.N → out/（预发布号，不打 tag）；可传基版本：npm run package:rc -- 1.1.3
 # 交互调试：VS Code 打开仓库按 F5，在扩展开发宿主窗口打开你的项目
 ```
 
 Node ≥ 18。无 `npm install`、无编译：`extension.js` 就是产物。
+
+> 打包一律走上面的 `package*` 脚本，别直接 `npx vsce`；具体用法与注意事项见 [CONVENTIONS §9](docs/CONVENTIONS.md#9-版本与发布约定)。
 
 ## 3. 红线（违反即返工）
 
