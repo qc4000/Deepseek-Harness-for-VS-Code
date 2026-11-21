@@ -127,7 +127,8 @@ ensureAuthProxy() → createAuthProxy(target)
 
 ### 5.1 入口与模型信息
 
-`registerDshModelProvider()` 注册 `vendor='dsh'` 的 provider，返回 `DSH_MODEL_DEFS`：
+`registerDshModelProvider()` 注册 `vendor='dsh'` 的 provider，条目来自 `buildDshModelDefs()`
+（函数而非顶层常量：`detail` 说明文案按当前语言取，spec 023）：
 
 | 条目 id | 名称 | DSH 侧 |
 | --- | --- | --- |
@@ -210,7 +211,7 @@ ensureAuthProxy() → createAuthProxy(target)
 ### 5.7 漂移自检
 
 `checkDshModelDrift()`：DSH 可达时读 `session/modelCatalog`，用 `findMissingDshModels()` 比对
-`DSH_MODEL_DEFS` 的非 `dsh` 条目；失配则 `showWarningMessage` 列出条目 → 模型与 DSH 在册模型。
+`buildDshModelDefs()` 的非 `dsh` 条目；失配则 `showWarningMessage` 列出条目 → 模型与 DSH 在册模型。
 每次扩展会话最多一次（`dshModelDriftChecked`），异常也置位（老版 dsh 无此端点）。
 
 ## 6. 链路 D：DSH 配套插件

@@ -7,7 +7,7 @@
 ## 1. 命令
 
 ```bash
-npm test                      # 语法检查 + 24 套离线单测（1353 项断言）
+npm test                      # 语法检查 + 25 套离线单测（1494 项断言）
 npm run test:one -- file-link # 只跑文件名含 file-link 的套件（TDD 内循环）
 npm run test:verbose          # 逐套件完整输出（看每个 ✓/✗）
 npm run test:all              # 追加真实 dsh e2e（需本机已安装 dsh）
@@ -54,6 +54,7 @@ CI 只认退出码，不看输出格式。
 | 套件 | 断言 | 覆盖 |
 | --- | --- | --- |
 | `auth-proxy.test.js` | 21 | 令牌解析；裸地址 401 控制组；Cookie 换发与注入；dsh 重启后 401 自动重换；SSE 分块不被缓冲；WebSocket 升级透传；`localhost` 与 `127.0.0.1` 按 authority 独立换发 |
+| `bilingual-ui.test.js` | 117 | 中英双语（spec 023）：守卫词法器自检（模板裸段 vs `${}` 分开判、格式标记白名单、`tr` 形态、顶层求值判定的合成用例）；`resolveLocale` 全分支（zh 系 / 其它语言 / 未知 / 设置覆盖 / 非法值回落）；`tr` 选语、`{name}` 占位、缺英文回退中文且只警告一次；**静态守卫**：`extension.js` 无裸中文字面量 + `tr` 形态合法 + 无顶层求值（语言不被锁死在缺省值）、插件 `lib/*.js` 无裸中文、`package.json` 全 `%key%` 且两份 nls（英/中）键集一致并覆盖全部占位、en 纯英文、无嵌套 `%…%`、`dshPanel.locale` 声明齐全；面板 HTML 中英双语（工具条 `aria-label`/文字、`<html lang>`、剥离 `<script>/<style>/注释` 后可见文本零中文 + zh 对照组防架空）；⏳ 产地标记跨语言读回（写入按当前语言、读取中英都认、角色/无标记不误判）；工作区跟随失败提示按 `reasonCode` 本地化 + 旧插件 `reason` 透传（zh 与改造前逐字节一致）；**清单语言 ≠ 运行时语言时的一次性提示**（`localeSplitWorthNotifying` 全分支 + 只弹一次 + 恢复缺省，AC-11）；新增运行时文件（`i18n.js`/`package.nls*.json`/`dsh-plugins`）不被 `.vscodeignore` 挡掉（含 3 条正例证明匹配器有效） |
 | `bundled-plugin-vendor.test.js` | 33 | 内置插件 vendor 防清理（Issue #31）：三个插件 vendor/node_modules 双份落盘且内容与扩展内置一致、profile `dependencies` 声明 `file:./vendor/<name>`、`.ignored` 式清理（只清 node_modules）后自愈、vendor 与 node_modules 双缺失时从扩展内置文件重建、重复安装幂等 |
 | `clipboard-bridge.test.js` | 16 | 复制按钮回退（007）的中继与宿主：合法 `clipboard-write` 转发、origin/source 双校验、超长不转发并回 `ok:false`、宿主回执回传 iframe、`vscode.env.clipboard.writeText` 成功/失败回执、失败提示只一次 |
 | `clipboard-plugin.test.js` | 42 | 生成文件的语法真实通过；只拦 ⌘C/⌘V/⌘X（不拦 ⌘A/撤销/光标）；macOS + Electron + iframe 三重门控；不写 `dependencies`；`cordis.patch.yml` 结构；复制按钮三级回退（原生成功不发消息、原生被拒走宿主、无回执/`ok:false` 时 `execCommand` 兜底、非 iframe 不接管、未知 token 忽略）；配置开关与“不拦 click/不碰 readText”约束 |
@@ -76,7 +77,7 @@ CI 只认退出码，不看输出格式。
 | `external-link-open.test.js` | 52 | 外链宿主路由（spec 014）：`dshPanel.externalLinkAction` 默认/三值/非法回退；`parseHttpUrl` 只放行 http(s)；`systemBrowser`/`vscodeBrowser`/`off`/login/popup 分支；`simpleBrowser.show` 失败提示一次 + 回退系统浏览器；`openExternal=false` 可见提示；真远程回环 `asExternalUri`；插件 0.2.0 落盘/幂等、`file:./vendor/<name>` 依赖声明与 vendor 副本 |
 | `desktop-app-support.test.js` | 62 | 官网 Windows 桌面版（上游）：安装目录定位（注册表 InstallLocation / 默认目录）、**自定义目录复现（Issue #29：`/f … /d` 输出无 InstallLocation）、卸载项子键提取与逐条读取、`DisplayIcon` / `UninstallString` 反推、含空格子键加引号、`REG_EXPAND_SZ` 展开、注入式 `probeDesktopDshCli`（run/exists/env/force）命中**、启动优先级（PATH → 桌面版 CLI → npx）、含空格路径的 cmd.exe 引号、源码级接线；`DESKTOP_CLI_REL` 用 win32 语义，Linux CI 同样可测 |
 | `workspace-file-link.test.js` | 98 | 插件文件齐全/声明/语法；中继脚本语法 + 协议字段；路径解析（相对多工作区、绝对、`../` 越界、不存在、`:12`/`#L12` 行号）；`revealAndOpen`/`revealOnly`/`off`；安装幂等 + vendor/node_modules 双份落盘与 `file:./vendor/<name>` 依赖声明（Issue #31，双缺失可重建）；`diffAndOpen` 枚举与 `dsh-vscode-changes` 安装（只宿主半边、登记 bundles、幂等、落盘语法通过）；相对路径按 DSH `cwd` 解析（011，cwd 指向别处时不命中 VS Code 同名文件）、cwd 为空/非法退回旧解析；中继透传 `cwd`、只透传具体轮次（`latest` 被丢弃，013） |
-| `workspace-pin.test.js` | 74 | 工作区跟随（006）：插件包声明（`dsh.client.platform=web`、bundle patch、无依赖）与「不碰 DOM/localStorage」静态约束；`workspacePinPath`/`workspacePinEnabled`/路径形状（空窗口、开关、URL、控制字符、超长）；中继脚本独立消息 `workspace-pin`（origin/source 双校验、8s 超时上报、结果状态白名单与 reason 截断、特殊字符路径不破坏脚本）；客户端仿真（未握手惰性、`create`+`openWorkspace` 各一次、已就位不动作、服务缺失上报 unsupported、失败上报 failed、未就绪轮询、重复下发幂等、非父级消息不认）；`ensureWorkspacePlugin` 落盘/登记/幂等 + vendor 副本与 `file:` 依赖声明（Issue #31） |
+| `workspace-pin.test.js` | 98 | 工作区跟随（006 + spec 023）：插件包声明（`dsh.client.platform=web`、bundle patch、无依赖）与「不碰 DOM/localStorage」静态约束、**client `PLUGIN_VERSION` 与 `package.json` 版本一致**（漂移 = 升级不生效）；`workspacePinPath`/`workspacePinEnabled`/路径形状（空窗口、开关、URL、控制字符、超长）；中继脚本独立消息 `workspace-pin`（origin/source 双校验、8s 超时上报、结果状态白名单与 reason 截断、**`reasonCode` 机器码白名单转发**——合法透传 / 非法与超长丢弃 / 旧插件字段缺席、特殊字符路径不破坏脚本）；客户端仿真（未握手惰性、`create`+`openWorkspace` 各一次、已就位不动作、服务缺失上报 unsupported、失败上报 failed 且带 `reasonCode` 三码与英文 reason、DSH 自有错误透传不带码、未就绪轮询、重复下发幂等、非父级消息不认）；`ensureWorkspacePlugin` 落盘/登记/幂等 + vendor 副本与 `file:` 依赖声明（Issue #31） |
 | `e2e-real-dsh.test.js` | — | 真实 dsh：启动参数与扩展一致；捕获 `dsh web:` 令牌；裸地址 401；经代理 200；真实 RPC 信封调用；结束清理 |
 
 ## 5. 写新测试的骨架

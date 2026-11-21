@@ -68,7 +68,7 @@ const I = ext.__internals;
 
 (async function run() {
   console.log('[1] 条目定义与映射一致');
-  const defs = I.DSH_MODEL_DEFS;
+  const defs = I.buildDshModelDefs();
   ok(Array.isArray(defs) && defs.length === 3, '只列 DeepSeek 现役模型（跟随 DSH 设置 + Flash + Pro）');
   ok(defs[0].id === 'dsh' && defs[0].name === 'DSH (DeepSeek Harness)', '首条为「跟随 DSH 设置」条目');
   ok(defs.map((d) => d.id).join(',') === [
@@ -104,18 +104,18 @@ const I = ext.__internals;
     ok(/^\$\d+(\.\d+)?$/.test(def.cost.inputCost) && /^\$\d+(\.\d+)?$/.test(def.cost.outputCost) && /^\$\d+(\.\d+)?$/.test(def.cost.cacheCost),
       def.id + ' 成本串合法（' + def.cost.inputCost + '/' + def.cost.outputCost + '/' + def.cost.cacheCost + '）');
   }
-  const priceOf = (id) => Number(I.DSH_MODEL_DEFS.find((d) => d.id === id).cost.inputCost.slice(1));
+  const priceOf = (id) => Number(I.buildDshModelDefs().find((d) => d.id === id).cost.inputCost.slice(1));
   ok(priceOf('dsh-deepseek-flash') < priceOf('dsh-deepseek-v4-pro'), 'Flash 单价低于 Pro（与官方调价后的峰值价一致）');
 
   console.log('[2b] 漂移自检（模型改名 / 未在册时不静默）');
   const liveCatalog = [{ id: 'deepseek-official', models: [{ id: 'deepseek-flash' }, { id: 'deepseek-v4-pro' }] }];
-  ok(I.findMissingDshModels(liveCatalog, I.DSH_MODEL_DEFS).length === 0, 'DSH 在册模型与条目一致时不报缺失');
+  ok(I.findMissingDshModels(liveCatalog, I.buildDshModelDefs()).length === 0, 'DSH 在册模型与条目一致时不报缺失');
   const staleCatalog = [{ id: 'deepseek-official', models: [{ id: 'deepseek-v4-flash' }, { id: 'deepseek-v4-pro' }] }];
-  const missing = I.findMissingDshModels(staleCatalog, I.DSH_MODEL_DEFS);
+  const missing = I.findMissingDshModels(staleCatalog, I.buildDshModelDefs());
   ok(missing.length === 1 && missing[0].entryId === 'dsh-deepseek-flash' && missing[0].model === 'deepseek-flash',
     'DSH 侧模型改名时精确报出失配条目');
-  ok(I.findMissingDshModels([], I.DSH_MODEL_DEFS).length === 2, 'provider 未配置时全部固定条目都算失配');
-  ok(I.findMissingDshModels(null, I.DSH_MODEL_DEFS).length === 2, '目录为空/异常输入不抛错');
+  ok(I.findMissingDshModels([], I.buildDshModelDefs()).length === 2, 'provider 未配置时全部固定条目都算失配');
+  ok(I.findMissingDshModels(null, I.buildDshModelDefs()).length === 2, '目录为空/异常输入不抛错');
   ok(I.findMissingDshModels(liveCatalog, [{ id: 'dsh' }]).length === 0, '「跟随 DSH 设置」条目不参与失配判定');
   await I.checkDshModelDrift(); // DSH 未运行：应静默返回、不抛错、不弹告警
   ok(true, 'DSH 不可达时自检静默通过（不打扰用户）');

@@ -35,8 +35,8 @@ function isE2E(file) {
 
 /** 语法检查：扩展主体 + 内置插件（含 ESM 的 lib/index.js）。 */
 function syntaxCheck() {
-  // 扩展主体 + 全部内置插件（插件目录新增时自动纳入，无需改这里）
-  const targets = ['extension.js'];
+  // 扩展主体 + 双语文案模块 + 全部内置插件（插件目录新增时自动纳入，无需改这里）
+  const targets = ['extension.js', 'i18n.js'];
   const pluginRoot = path.join(ROOT, 'dsh-plugins');
   let pluginDirs = [];
   try {
@@ -62,7 +62,8 @@ function syntaxCheck() {
       failed.push(rel + '\n' + String(r.stderr || r.stdout || '').trim());
     }
   }
-  return { failed, pluginFiles: targets.length - 1 };
+  // targets[0]=extension.js、targets[1]=i18n.js，其余是插件文件
+  return { failed, pluginFiles: targets.length - 2 };
 }
 
 function listSuites() {
@@ -99,7 +100,7 @@ function main() {
     console.error('\n语法检查未通过，测试未执行。');
     process.exit(1);
   }
-  console.log('  ✓ extension.js + dsh-plugins（' + syntax.pluginFiles + ' 个插件文件）');
+  console.log('  ✓ extension.js + i18n.js + dsh-plugins（' + syntax.pluginFiles + ' 个插件文件）');
 
   const suites = listSuites();
   if (suites.length === 0) {

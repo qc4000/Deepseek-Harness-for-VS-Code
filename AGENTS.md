@@ -14,7 +14,7 @@
 ## 2. 命令
 
 ```bash
-npm test                      # 语法检查 + 24 套离线单测（1353 项断言；无需 npm install）
+npm test                      # 语法检查 + 25 套离线单测（1494 项断言；无需 npm install）
 npm run test:one -- <子串>    # 只跑匹配的套件（TDD 内循环）
 npm run test:all              # 追加真实 dsh e2e（需本机已装 dsh）
 npm run package               # 打 .vsix
@@ -38,7 +38,7 @@ Node ≥ 18。无 `npm install`、无编译：`extension.js` 就是产物。
 - CommonJS、2 空格、单引号、分号；**注释写「为什么」且用中文**，函数上方 JSDoc，`// ====` / `// ──` 分节。
 - 命名语义：`get*` 取值、`ensure*` 幂等、`resolve*` 解析、`build*` 产出、`is*` 判定、`try*` 尽力而为。
 - 可测性：判定逻辑抽纯函数并挂 `module.exports.__internals`；并发去重复用既有模式（单飞 Promise / `Map<key,Promise>`）。
-- 用户文案中文、全角标点，失败要写「怎么办」；日志前缀 `[DeepSeek Harness]`。
+- 用户文案**中英双语**（spec 023）：调用点写 `tr('中文', 'English', vars)`——中文是源、与历史逐字节一致，英文禁 `"`/`'`/反插值符号（生成 HTML/JS 里安全）；失败要写「怎么办」；日志前缀 `[DeepSeek Harness]`。**读回匹配的序列化格式标记**（`用户：`、`【文件引用】` 等）与配置**取值**保持语言稳定、不翻译；清单文案走 `%key%` + `package.nls.json`（英）/`package.nls.zh.json`（中），守卫见 `test/bilingual-ui.test.js`。
 - 改 `extension.js` 前先读 [架构说明](docs/ARCHITECTURE.md)（四条链路 + DSH 契约新旧对照表）。
 
 ## 5. 测试（TDD，详见 [TESTING](docs/TESTING.md)）

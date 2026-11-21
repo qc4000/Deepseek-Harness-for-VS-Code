@@ -249,7 +249,7 @@ async function main() {
     if (official) {
       const ids = official.models.map((m) => m.id);
       console.log('[6] deepseek-official 在册模型：' + ids.join(', '));
-      for (const def of ext.__internals.DSH_MODEL_DEFS) {
+      for (const def of ext.__internals.buildDshModelDefs()) {
         const sel = ext.__internals.resolveDshModelSelection(def.id);
         if (!sel) continue; // 'dsh' 条目跟随 DSH 设置，不固定模型
         assert.ok(ids.includes(sel.model),

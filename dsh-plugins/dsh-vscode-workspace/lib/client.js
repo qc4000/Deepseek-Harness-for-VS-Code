@@ -9,16 +9,24 @@
 //       → ctx.workspaces.create({ path })（幂等注册）→ ctx.uiWorkspace.openWorkspace(id)
 //       → 回报 workspace-pin-result（done/already/unsupported/failed）→ 宿主按需提示。
 //
+// 回报字段（spec 023 双语）：status 之外，failed 必带 reason（非空；旧宿主直接展示它，
+//       所以我们自造的失败一律写英文短句）。插件自造的失败另带**可选** reasonCode
+//       （机器码，形态 /^[a-z][a-z0-9-]{0,31}$/，宿主按码出本地化文案）：
+//       ready-timeout（等工作区/会话快照就绪超时）、contract-mismatch（workspace/create
+//       没回 workspaceId）、unknown-error（错误没有 message）。DSH 自己抛的错误只把
+//       error.message 原样透传为 reason、不带 reasonCode（文案不归我们管）；没有码时
+//       整个 reasonCode 字段省略（不发空串）。新旧宿主/插件交叉都能用，无版本握手。
+//
 // 三条底线（与 dsh-vscode-file-links 一致）：
 // 1. 只在宿主握手后动作；独立浏览器 / 其它宿主里完全不介入；
 // 2. 只用 DSH 公开客户端服务：不改 DOM、不注入样式、不拦交互、不写 localStorage；
 // 3. 已在该工作区就什么都不做（不新建多余会话）；任何失败都回报宿主，绝不静默。
 
-window.__ModuleLoader__.load({ id: 'dsh-vscode-workspace', factory: (require) => {
+window.__ModuleLoader__.load({ id: 'dsh-vscode-workspace', factory: function (require) {
   var module = { exports: {} }
   var exports = module.exports
 
-  var PLUGIN_VERSION = '0.1.0'
+  var PLUGIN_VERSION = '0.2.0'
   // 父级 webview（VS Code 扩展）的身份标记，与中继脚本里的 HOST_ID 一致。
   var HOST_ID = 'dsh-vscode-host'
   var SELF_ID = 'dsh-vscode-workspace'
@@ -137,16 +145,53 @@ window.__ModuleLoader__.load({ id: 'dsh-vscode-workspace', factory: (require) =>
     return ''
   }
 
-  function messageOf(error) {
-    if (!error) return '未知错误'
-    var text = typeof error.message === 'string' && error.message !== '' ? error.message : String(error)
-    return text.slice(0, REASON_MAX_LENGTH)
+  // 自造失败的兜底英文文案：没有 message 的错误也必须给非空 reason（协议要求）。
+  var UNKNOWN_REASON = 'Unknown error while switching workspace.'
+  // 机器码形态（与宿主白名单一致）。
+  var REASON_CODE_RE = /^[a-z][a-z0-9-]{0,31}$/
+
+  /**
+   * 造一个「插件自己负责」的失败：英文短句 + 机器码，宿主按码出本地化文案。
+   * @param {string} reason 英文短句（旧宿主直接展示）
+   * @param {string} reasonCode 机器码
+   * @returns {Error}
+   */
+  function ownFailure(reason, reasonCode) {
+    var error = new Error(reason)
+    error.reasonCode = reasonCode
+    return error
   }
 
-  /** 回报判定结果；宿主据此决定是否给用户提示。 */
-  function report(status, reason) {
+  /**
+   * 把失败归一成 { reason, reasonCode? }：
+   * - 我们自己抛的错误带 reasonCode → 英文 reason + 机器码；
+   * - DSH 自己抛的错误（有 message）→ 原样透传 message、不带码（文案不归我们管）；
+   * - 没有 message 的怪值/空值 → unknown-error。
+   * @param {any} error
+   * @returns {{reason: string, reasonCode?: string}}
+   */
+  function failureOf(error) {
+    var code = error && typeof error.reasonCode === 'string' && REASON_CODE_RE.test(error.reasonCode)
+      ? error.reasonCode
+      : undefined
+    var message = error && typeof error.message === 'string' && error.message !== ''
+      ? error.message.slice(0, REASON_MAX_LENGTH)
+      : undefined
+    if (code !== undefined) {
+      return { reason: message !== undefined ? message : UNKNOWN_REASON, reasonCode: code }
+    }
+    if (message !== undefined) return { reason: message }
+    return { reason: UNKNOWN_REASON, reasonCode: 'unknown-error' }
+  }
+
+  /**
+   * 回报判定结果；宿主据此决定是否给用户提示。
+   * reasonCode 仅插件自造失败携带；不传/传空串时整个字段省略（不发空值）。
+   */
+  function report(status, reason, reasonCode) {
     var payload = { type: 'workspace-pin-result', status: status }
     if (reason !== undefined) payload.reason = String(reason).slice(0, REASON_MAX_LENGTH)
+    if (reasonCode !== undefined && reasonCode !== '') payload.reasonCode = String(reasonCode)
     postToHost(payload)
   }
 
@@ -164,7 +209,7 @@ window.__ModuleLoader__.load({ id: 'dsh-vscode-workspace', factory: (require) =>
     if (!ready) {
       if (tries >= READY_MAX_TRIES) {
         applied = true
-        report('failed', '等待 DSH 工作区列表就绪超时')
+        report('failed', 'Timed out waiting for DSH workspace/session snapshots to be ready.', 'ready-timeout')
         return
       }
       window.setTimeout(function () { waitReady(target, tries + 1) }, READY_POLL_MS)
@@ -184,11 +229,15 @@ window.__ModuleLoader__.load({ id: 'dsh-vscode-workspace', factory: (require) =>
       .then(function (value) {
         // 只认 { workspaceId } 的对象形态；字符串/空值一律当作契约不符。
         var id = value && (value.workspaceId || (value.workspace && value.workspace.workspaceId))
-        if (typeof id !== 'string' || id === '') throw new Error('workspace/create 未返回 workspaceId')
+        if (typeof id !== 'string' || id === '') throw ownFailure('workspace/create did not return a workspaceId.', 'contract-mismatch')
         return Promise.resolve(ui.openWorkspace(id))
       })
       .then(function () { report('done') })
-      .catch(function (error) { report('failed', messageOf(error)) })
+      .catch(function (error) {
+        // DSH 自己的错误只透传 message（无 reasonCode）；自造失败/无 message 归一出机器码。
+        var failure = failureOf(error)
+        report('failed', failure.reason, failure.reasonCode)
+      })
   }
 
   /** 收到宿主下发的目标路径：先校验服务契约，再进入等待就绪的流程。 */

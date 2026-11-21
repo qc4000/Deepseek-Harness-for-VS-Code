@@ -14,6 +14,7 @@ const assert = require('assert');
 const path = require('path');
 const Module = require('module');
 const vm = require('vm');
+const { resolveManifestText } = require('./lib/nls-resolve');
 
 let passed = 0;
 function ok(cond, name) {
@@ -415,7 +416,7 @@ function makeRealm() {
     const pkg = JSON.parse(require('fs').readFileSync(path.join(__dirname, '..', 'package.json'), 'utf8'));
     const contributes = pkg.contributes || {};
     const cmd = (contributes.commands || []).find((c) => c.command === 'dshPanel.focusInput');
-    ok(cmd && /聚焦 DSH 输入框/.test(cmd.title), '命令已声明');
+    ok(cmd && /聚焦 DSH 输入框/.test(resolveManifestText(cmd.title, 'zh')), '命令已声明');
     const kb = (contributes.keybindings || []).find((k) => k.command === 'dshPanel.focusInput');
     ok(kb && kb.key === 'ctrl+shift+j' && kb.mac === 'cmd+shift+j', '默认键位 Ctrl+Shift+J / ⇧⌘J（避开 Linux 桌面快捷键与 Alt）');
     ok(kb && kb.when === I.FOCUS_INPUT_CONTEXT, '键位受 when 上下文控制（可彻底解绑）');

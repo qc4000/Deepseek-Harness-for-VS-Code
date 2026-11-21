@@ -76,6 +76,13 @@ console.log('[1] 插件包静态契约（文件 / 声明 / 零干预约束）');
   try { pkg = JSON.parse(readIfExists(path.join(PLUGIN_DIR, 'package.json')) || '{}'); } catch (e) { pkg = {}; }
   ok(pkg.name === PLUGIN, 'package.json name 与目录名一致');
   ok(/^\d+\.\d+\.\d+$/.test(String(pkg.version)), '版本号可解析');
+  // 版本漂移 = 升级不生效：宿主按 package.json 版本比对决定是否覆盖安装，
+  // 而插件自报的 PLUGIN_VERSION 只用于排障展示，两处必须同步（spec 023 一并 bump 到 0.2.0）。
+  const clientSrcForVersion = readIfExists(path.join(PLUGIN_DIR, 'lib', 'client.js'));
+  const selfVersion = /var PLUGIN_VERSION = '([^']+)'/.exec(clientSrcForVersion);
+  ok(!!selfVersion && selfVersion[1] === String(pkg.version),
+    'client 的 PLUGIN_VERSION 与 package.json 版本一致（' + (selfVersion ? selfVersion[1] : '缺失')
+      + ' vs ' + pkg.version + '）');
   ok(pkg.type === 'module' && pkg.main === 'lib/index.js', 'ESM 宿主半区入口正确');
   ok(pkg.dsh && pkg.dsh.client && pkg.dsh.client.platform === 'web', '声明 web 客户端半区（DSH 才会加载）');
   ok(pkg.dsh && pkg.dsh.bundle && pkg.dsh.bundle.patch === './cordis.patch.yml', 'bundle.patch 指向 cordis.patch.yml');
@@ -275,6 +282,43 @@ console.log('[3] 中继脚本：握手、来源校验、超时与结果白名单
   result.runTimers(8000);
   ok(!result.toHost.some((m) => m.type === 'dsh-workspace-pin-unavailable'), '已收到结果后不再报超时');
 
+  // reasonCode（spec 023 AC-6）：机器码透传给宿主由宿主本地化；白名单外一律不转发。
+  const coded = makeRealm({ pinPath: '/mnt/work/proj-b' });
+  coded.fireLoad();
+  coded.fromPlugin({ type: 'hello' });
+  coded.fromPlugin({
+    type: 'workspace-pin-result', status: 'failed',
+    reason: 'Timed out waiting for DSH workspace/session snapshots to be ready.',
+    reasonCode: 'ready-timeout'
+  });
+  const codedReported = coded.toHost.filter((m) => m.type === 'dsh-workspace-pin-result');
+  ok(codedReported.length === 1 && codedReported[0].reasonCode === 'ready-timeout', '合法 reasonCode 透传给宿主');
+
+  const badCode = makeRealm({ pinPath: '/mnt/work/proj-b' });
+  badCode.fireLoad();
+  badCode.fromPlugin({ type: 'hello' });
+  badCode.fromPlugin({ type: 'workspace-pin-result', status: 'failed', reason: 'boom', reasonCode: 'READY Timeout' });
+  const badReported = badCode.toHost.filter((m) => m.type === 'dsh-workspace-pin-result');
+  ok(badReported.length === 1 && !Object.prototype.hasOwnProperty.call(badReported[0], 'reasonCode'),
+    '白名单外的 reasonCode 不转发（不给页面自定义宿主提示的机会）');
+  ok(badReported[0].status === 'failed', '但结果本身照常转发（提示不丢）');
+
+  const longCode = makeRealm({ pinPath: '/mnt/work/proj-b' });
+  longCode.fireLoad();
+  longCode.fromPlugin({ type: 'hello' });
+  longCode.fromPlugin({ type: 'workspace-pin-result', status: 'failed', reason: 'boom', reasonCode: 'a'.repeat(64) });
+  const longReported = longCode.toHost.filter((m) => m.type === 'dsh-workspace-pin-result');
+  ok(longReported.length === 1 && !Object.prototype.hasOwnProperty.call(longReported[0], 'reasonCode'),
+    '超长 reasonCode 不转发');
+
+  const noCode = makeRealm({ pinPath: '/mnt/work/proj-b' });
+  noCode.fireLoad();
+  noCode.fromPlugin({ type: 'hello' });
+  noCode.fromPlugin({ type: 'workspace-pin-result', status: 'failed', reason: 'legacy plugin text' });
+  const noCodeReported = noCode.toHost.filter((m) => m.type === 'dsh-workspace-pin-result');
+  ok(noCodeReported.length === 1 && !Object.prototype.hasOwnProperty.call(noCodeReported[0], 'reasonCode'),
+    '旧插件不带 reasonCode → 字段缺席（宿主走 reason 透传回退）');
+
   const bogus = makeRealm({ pinPath: '/mnt/work/proj-b' });
   bogus.fireLoad();
   bogus.fromPlugin({ type: 'hello' });
@@ -297,7 +341,8 @@ const clientSource = readIfExists(path.join(PLUGIN_DIR, 'lib', 'client.js'));
 
 /**
  * 造一个 DSH 客户端域。
- * @param {{targetPath?:string, mainCwd?:string, ready?:boolean, missing?:string, createThrows?:boolean}} o
+ * @param {{targetPath?:string, mainCwd?:string, ready?:boolean, missing?:string,
+ *   createThrows?:boolean, createThrowsNoMessage?:boolean, createResult?:any}} o
  */
 function makeClientEnv(o) {
   const opts = o || {};
@@ -338,6 +383,10 @@ function makeClientEnv(o) {
     create: async (input) => {
       calls.create.push(input);
       if (opts.createThrows) throw new Error('workspace/create 失败：目录不存在');
+      // 无 message 的怪值：插件须归一成 unknown-error（spec 023）。
+      if (opts.createThrowsNoMessage) throw { code: 'EFAIL' };
+      // 契约失配：create 成功返回却没有 workspaceId（spec 023）。
+      if (opts.createResult !== undefined) return opts.createResult;
       return { workspaceId: 'ws-b', path: input.path, created: true };
     }
   };
@@ -393,6 +442,8 @@ async function settle(env) {
     ok(env.calls.create.length === 1 && env.calls.create[0].path === '/mnt/work/proj-b', '握手后按宿主路径注册工作区（幂等 create）');
     ok(env.calls.open.length === 1 && env.calls.open[0] === 'ws-b', '注册成功后切到该工作区');
     ok(env.posted.some((m) => m.type === 'workspace-pin-result' && m.status === 'done'), '回报 done');
+    const doneMsg = env.posted.find((m) => m.type === 'workspace-pin-result' && m.status === 'done');
+    ok(!('reasonCode' in doneMsg), '成功回报不带 reasonCode（无码时省略字段，不发空串）');
 
     const already = makeClientEnv({ mainCwd: '/mnt/work/proj-b' });
     already.hostMessage({ type: 'workspace-pin', path: '/mnt/work/proj-b' });
@@ -413,6 +464,34 @@ async function settle(env) {
     const failed = failing.posted.filter((m) => m.type === 'workspace-pin-result' && m.status === 'failed');
     ok(failed.length === 1, '注册失败 → 上报 failed（不抛到页面）');
     ok(typeof failed[0].reason === 'string' && failed[0].reason.length > 0, '失败带原因文本');
+    ok(failed[0].reason === 'workspace/create 失败：目录不存在', 'DSH 自己抛的错误 → reason 原样透传（文案不归插件管）');
+    ok(!('reasonCode' in failed[0]), 'DSH 自己抛的错误 → 不带 reasonCode');
+
+    // 失败原因语言中立（spec 023）：插件自造的失败 = 英文非空 reason + 稳定机器码。
+    const CJK_RE = require(path.join(__dirname, 'lib', 'js-scan.js')).CJK_RE;
+    const CODE_RE = /^[a-z][a-z0-9-]{0,31}$/;
+
+    const mismatch = makeClientEnv({ createResult: { ok: true } });
+    mismatch.hostMessage({ type: 'workspace-pin', path: '/mnt/work/proj-b' });
+    await settle(mismatch);
+    const mismatched = mismatch.posted.filter((m) => m.type === 'workspace-pin-result' && m.status === 'failed');
+    ok(mismatched.length === 1, 'create 未返回 workspaceId → 上报 failed（不抛到页面）');
+    ok(mismatched[0].reasonCode === 'contract-mismatch', '契约失配带 reasonCode=contract-mismatch');
+    ok(typeof mismatched[0].reason === 'string' && mismatched[0].reason.length > 0, '契约失配 reason 非空');
+    ok(!CJK_RE.test(mismatched[0].reason), '契约失配 reason 无中文（语言中立）');
+
+    const noMsg = makeClientEnv({ createThrowsNoMessage: true });
+    noMsg.hostMessage({ type: 'workspace-pin', path: '/mnt/work/proj-b' });
+    await settle(noMsg);
+    const unknown = noMsg.posted.filter((m) => m.type === 'workspace-pin-result' && m.status === 'failed');
+    ok(unknown.length === 1, '无 message 的错误 → 上报 failed（不抛到页面）');
+    ok(unknown[0].reasonCode === 'unknown-error', '无 message 错误带 reasonCode=unknown-error');
+    ok(typeof unknown[0].reason === 'string' && unknown[0].reason.length > 0, 'unknown-error reason 非空');
+    ok(!CJK_RE.test(unknown[0].reason), 'unknown-error reason 无中文（语言中立）');
+
+    for (const m of [mismatched[0], unknown[0]]) {
+      ok(CODE_RE.test(m.reasonCode), 'reasonCode 符合机器码形态：' + m.reasonCode);
+    }
 
     const slow = makeClientEnv({ ready: false });
     slow.hostMessage({ type: 'workspace-pin', path: '/mnt/work/proj-b' });
@@ -422,6 +501,19 @@ async function settle(env) {
     slow.markReady();
     await settle(slow);
     ok(slow.calls.create.length === 1, '就绪后再注册（轮询等待，而不是放弃）');
+
+    // 快照一直不就绪 → 插件等到轮询上限必须自己报失败（绝不静默）。
+    const timeout = makeClientEnv({ ready: false });
+    timeout.hostMessage({ type: 'workspace-pin', path: '/mnt/work/proj-b' });
+    for (let i = 0; i < 20 && !timeout.posted.some((m) => m.type === 'workspace-pin-result'); i += 1) {
+      await settle(timeout);
+    }
+    const timedOut = timeout.posted.filter((m) => m.type === 'workspace-pin-result' && m.status === 'failed');
+    ok(timedOut.length === 1, '快照始终未就绪 → 超时上报 failed（不静默）');
+    ok(timedOut[0].reasonCode === 'ready-timeout', '超时失败带 reasonCode=ready-timeout');
+    ok(typeof timedOut[0].reason === 'string' && timedOut[0].reason.length > 0, '超时失败 reason 非空');
+    ok(!CJK_RE.test(timedOut[0].reason), '超时失败 reason 无中文（语言中立）');
+    ok(CODE_RE.test(timedOut[0].reasonCode), 'reasonCode 符合机器码形态：' + timedOut[0].reasonCode);
 
     const dup = makeClientEnv({});
     dup.hostMessage({ type: 'workspace-pin', path: '/mnt/work/proj-b' });

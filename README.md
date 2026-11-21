@@ -102,6 +102,11 @@
 | `dshPanel.forwardKeybindings` | `{}` | 在默认转发表之上增删按键：值写命令 id 表示转发（也可覆盖默认），写 `false` 表示永不拦截。不支持两段式（`ctrl+k ctrl+s`）；无修饰键的单键不会被拦截（会破坏输入框） |
 | `dshPanel.focusReleaseKey` | `F6` | 把焦点交还 VS Code 的按键。按下后可使用任意自定义键位与两段式快捷键，办完事按 `Ctrl+Shift+J`（macOS `⇧⌘J`）直接跳回输入框；置空字符串可关闭（不影响快捷键转发） |
 | `dshPanel.focusInputEnabled` | `true` | 是否为「聚焦 DSH 输入框」提供默认键位 `Ctrl+Shift+J`（macOS `⇧⌘J`）。关闭后该组合彻底不生效（不占用你的按键），命令本身仍可在命令面板调用；换组合请在「键盘快捷方式」里搜 `dshPanel.focusInput` |
+| `dshPanel.locale` | `auto` | **界面文案语言**（中英双语）：`auto` 跟随 VS Code 显示语言——显示语言是中文（`zh-cn`/`zh-tw`/`zh-Hans`…）就显示中文，其它语言一律显示英文；`zh` / `en` 强制单语，改完下一条提示即生效。只影响本扩展自己的文案（通知、状态栏、面板工具条、设置说明、命令标题），不改 DSH 页面本身的语言 |
+
+**中英双语界面**：上面这条 `dshPanel.locale` 决定扩展**运行时文案**（通知、状态栏、面板工具条与错误页、QuickPick、进度提示、模型选择器条目说明）的语言——中文环境显示中文（与历史版本逐字节一致），其它环境显示英文；`auto` 下改 VS Code 显示语言立即跟随。插件上报给宿主的失败原因走机器码（`reasonCode`）由宿主本地化，旧版插件的原始原因文本也会原样透传、不会丢提示。少数**序列化格式标记**（`用户：`、`【文件引用】` 等）是扩展与 Copilot/DSH 之间读回匹配的协议，按数据格式处理、保持语言稳定。
+
+**命令菜单与设置页说明不归本设置管**：它们来自扩展清单（`package.json` 的 `%key%` + `package.nls*.json`），由 VS Code 在加载扩展时按**显示语言**解析，没有「按扩展设置在运行时换语言」的口子。想让右键菜单、命令面板标题、设置描述也变英文，用 `Ctrl+Shift+P` → `Configure Display Language` 把显示语言切成 English（Reload 生效）——此时 `auto` 下运行时提示也自动是英文，全界面一致。`dshPanel.locale` 与显示语言被拧开（例如显示语言中文 + `dshPanel.locale=en`）会出现「提示英文、菜单中文」的混排，扩展会**弹一次**提示说明原因与统一办法。
 
 ### 面板内外部链接怎么打开（v1.1.0 起）
 
@@ -473,7 +478,7 @@ code --install-extension deepseek-harness-vscode-<版本>.vsix
 ### 开发与测试
 
 ```bash
-npm test                    # 语法检查 + 24 套离线单测（1353 项断言，无需 npm install）
+npm test                    # 语法检查 + 25 套离线单测（1494 项断言，无需 npm install）
 npm run test:one -- file-link   # 只跑文件名含该子串的套件
 npm run test:all            # 追加真实 dsh 端到端（需本机已安装 dsh）
 npm run package             # 打包 .vsix

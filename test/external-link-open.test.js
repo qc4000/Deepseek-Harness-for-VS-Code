@@ -18,6 +18,7 @@ const fs = require('fs');
 const os = require('os');
 const { spawnSync } = require('child_process');
 const Module = require('module');
+const { resolveManifestText } = require('./lib/nls-resolve');
 
 let passed = 0;
 function ok(cond, name) {
@@ -248,7 +249,7 @@ function statusCount(fragment) {
     ok(!!prop, 'dshPanel.externalLinkAction 已登记');
     ok(prop.default === 'systemBrowser', '默认值 systemBrowser');
     ok(Array.isArray(prop.enum) && prop.enum.join(',') === 'off,systemBrowser,vscodeBrowser', 'enum 三个值');
-    ok(typeof prop.markdownDescription === 'string' && prop.markdownDescription.indexOf('window.open') >= 0, '说明 off 不影响 window.open 登录链路');
+    ok(typeof prop.markdownDescription === 'string' && resolveManifestText(prop.markdownDescription, 'zh').indexOf('window.open') >= 0, '说明 off 不影响 window.open 登录链路');
   }
 
   console.log('[8] 插件 0.2.0 安装 / 幂等 / vendor 依赖声明');
