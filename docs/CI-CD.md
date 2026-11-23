@@ -69,6 +69,17 @@ Windows 本地验证包内容可用 `tar -tf`（Windows 10+ 自带 bsdtar）或�
    - 每条写**对用户的影响**（配置项、可见行为、升级动作），不堆 commit 摘要；
    - 已知问题 / 升级提示用引用块（`>`）单列，不混进分类；
    - 文末保留 `**Full Changelog**: …/compare/v<上一版>...v<当前版>`（GitHub 自动生成的同名链接格式）。
+
+   **执行方式（工作流只建壳，补写靠人）**：Release 工作流用 `gh release create … --generate-notes`
+   自动建壳并**直接发布**，那只是 GitHub 按提交生成的底稿（2026-11-23 的 v1.1.3 就是裸底稿上线的）。
+   发布后**立刻**按上面四条补写——网页 Release 编辑页，或：
+
+   ```bash
+   gh release edit v1.1.3 --notes-file <整理好的说明文件>
+   ```
+
+   补写完成前，该版本的 Release 说明视为**未完成**（裸底稿即违反本条）。
+   参考写法：已发布的 `v1.1.3`、`v1.1.2` 的 Release 说明。
 7. **Marketplace（可选）**：仓库 Secrets 里配置 `VSCE_PAT` 后，同一工作流会执行
    `vsce publish --packagePath`；未配置则跳过（GitHub Release 仍可用）。
 8. **发布后验证**：下载 Release 里的 `.vsix`，`code --install-extension <file>` ，
